@@ -17,7 +17,7 @@ function panelHtml() {
   return `
   <div data-testid="zz-panel" style="position:fixed;top:8px;right:338px;z-index:99999;width:380px;max-height:92vh;overflow:auto;background:#111;color:#eee;border:1px solid #555;border-radius:8px;padding:10px;font:12px sans-serif;">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-      <b>zig-zag filler v0.1 (never submits)</b>
+      <b>zig-zag filler (never submits)</b>
       <button data-testid="zz-collapse" style="background:#333;color:#eee;border:1px solid #555;border-radius:4px;">–</button>
     </div>
     <div data-testid="zz-body">

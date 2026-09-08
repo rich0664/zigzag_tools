@@ -118,17 +118,30 @@ function trackRows() {
   return [...(zzRoot()?.querySelectorAll('[data-testid^="track-row-"]') || [])];
 }
 
-async function waitForCount(getCount, target, timeoutMs) {
+async function waitForTrue(cond, timeoutMs) {
   const deadline = Date.now() + (timeoutMs || 3000);
   while (Date.now() < deadline) {
-    if (getCount() >= target) return true;
+    if (cond()) return true;
     await sleep(250);
   }
-  return getCount() >= target;
+  return !!cond();
 }
 
-// Interleaved: fill row i, then add row i+1, waiting for each row to render.
-// (Batch-adding first fails: rows render slowly and inputs shift around.)
+async function waitForCount(getCount, target, timeoutMs) {
+  return waitForTrue(() => getCount() >= target, timeoutMs);
+}
+
+function trackTab(i) {
+  return zzRoot()?.querySelector(`[data-testid="track-tab-${i}"]`) || null;
+}
+
+function trackRow(i) {
+  return zzRoot()?.querySelector(`[data-testid="track-row-${i}"]`) || null;
+}
+
+// The form renders ONLY the active tab's row (other rows unmount, data stays
+// in React state). So: select tab i (creating it first if needed), wait for
+// its row, fill it, repeat.
 async function fillTracks(tracks, log) {
   if (!tracks.length) {
     log('no tracks parsed — nothing to fill (see debug dump)');
@@ -141,23 +154,27 @@ async function fillTracks(tracks, log) {
   }
   let filled = 0;
   for (let i = 0; i < tracks.length; i++) {
-    // Ensure row i exists (row 0 exists by default).
-    let present = await waitForCount(() => trackTitleInputs().length, i + 1, 1500);
-    for (let c = 0; c < 4 && !present; c++) {
+    if (!trackTab(i)) {
       add.click();
-      present = await waitForCount(() => trackTitleInputs().length, i + 1, 3000);
+      if (!(await waitForTrue(() => !!trackTab(i), 4000))) {
+        log(`tab ${i + 1} never appeared — stopping, rest manual`);
+        break;
+      }
     }
-    if (!present) {
+    trackTab(i).click();
+    if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
       log(`row ${i + 1} never rendered — stopping, rest manual`);
       break;
     }
-    const titles = trackTitleInputs();
-    const links = trackLinkInputs();
-    if (tracks[i].title && titles[i]) setReactText(titles[i], tracks[i].title);
-    if (tracks[i].url) {
-      if (links[i]) setReactText(links[i], tracks[i].url);
-      else log(`row ${i + 1}: link input not rendered yet`);
-    }
+    const row = trackRow(i);
+    const title = row.querySelector('input[placeholder="Track title"]');
+    const link = [...row.querySelectorAll('input')].find((el) =>
+      (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
+    );
+    // Discogs title wins on mismatch (per zig-zag mods).
+    if (tracks[i].title && title) setReactText(title, tracks[i].title);
+    if (tracks[i].url && link) setReactText(link, tracks[i].url);
+    else if (tracks[i].url && !link) log(`row ${i + 1}: link input missing`);
     filled++;
     await sleep(300);
   }
