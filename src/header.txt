@@ -1,0 +1,13 @@
+// ==UserScript==
+// @name         zig-zag release filler
+// @namespace    zigzagTools
+// @version      0.1.0
+// @description  Fill the zig-zag.fm Add-a-release form from a Discogs link + YouTube playlist link. Never submits.
+// @match        https://www.zig-zag.fm/contributors*
+// @grant        GM_xmlhttpRequest
+// @connect      discogs.com
+// @connect      www.discogs.com
+// @connect      api-img.discogs.com
+// @connect      www.youtube.com
+// @run-at       document-idle
+// ==/UserScript==

@@ -1,0 +1,114 @@
+// Browser-only wiring: fetching (GM_xmlhttpRequest), orchestration, boot.
+// Depends on globals from discogs.js / youtube.js / match.js / fill.js / ui.js
+// (concatenated scope in the built userscript).
+
+function gmGet(url, responseType) {
+  return new Promise((resolve, reject) => {
+    GM_xmlhttpRequest({
+      method: 'GET',
+      url,
+      responseType: responseType || 'text',
+      onload: (res) => (res.status >= 200 && res.status < 300 ? resolve(res) : reject(new Error(`HTTP ${res.status} for ${url}`))),
+      onerror: (e) => reject(new Error(`network error for ${url}: ${e && e.error}`)),
+      ontimeout: () => reject(new Error(`timeout for ${url}`)),
+    });
+  });
+}
+
+async function onFetch() {
+  const dUrl = document.querySelector('[data-testid="zz-discogs"]')?.value.trim();
+  const pUrl = document.querySelector('[data-testid="zz-playlist"]')?.value.trim();
+  if (!dUrl || !pUrl) {
+    zzLog('paste both URLs first');
+    return;
+  }
+  try {
+    zzLog('fetching Discogs…');
+    const dRes = await gmGet(dUrl);
+    ZZ.state.discogs = parseDiscogs(dRes.responseText, dUrl);
+    const d = ZZ.state.discogs;
+    zzLog(`discogs: "${d.title}" — ${d.artists.join(', ')} (${d.year || 'no year'}), ${d.tracks.length} tracks [${d.debug.strategies.join(', ')}]`);
+  } catch (e) {
+    zzLog('discogs fetch failed: ' + e.message);
+    return;
+  }
+  try {
+    zzLog('fetching YouTube…');
+    const listUrl = canonicalPlaylistUrl(pUrl);
+    if (listUrl) {
+      const yRes = await gmGet(listUrl);
+      ZZ.state.videos = parsePlaylistVideos(yRes.responseText);
+    } else {
+      const vId = videoIdFromUrl(pUrl);
+      if (!vId) {
+        zzLog('could not read playlist or video id from YouTube URL');
+        return;
+      }
+      const wRes = await gmGet(cleanYoutubeUrl(vId));
+      const one = parseWatchVideo(wRes.responseText, pUrl);
+      ZZ.state.videos = one ? [one] : [];
+    }
+    zzLog(`youtube: ${ZZ.state.videos.length} video(s)`);
+  } catch (e) {
+    zzLog('youtube fetch failed: ' + e.message);
+    return;
+  }
+  ZZ.state.matches = matchTracksToVideos(ZZ.state.discogs.tracks, ZZ.state.videos, ZZ.state.discogs.artists);
+  const auto = ZZ.state.matches.filter((m) => m.video).length;
+  zzLog(`matched ${auto}/${ZZ.state.matches.length} tracks — review the table, then Fill form`);
+  renderPreview();
+}
+
+async function onFill() {
+  const d = ZZ.state.discogs;
+  if (!d) {
+    zzLog('nothing fetched yet');
+    return;
+  }
+  // Read user overrides from the preview table.
+  const tracks = ZZ.state.matches.map((m, i) => {
+    const sel = document.querySelector(`[data-testid="zz-match-${i}"]`);
+    const video = sel ? ZZ.state.videos.find((v) => v.id === sel.value) : m.video;
+    return { title: m.track, url: video ? video.url : null };
+  });
+  let coverBlob = null;
+  if (d.coverUrl) {
+    try {
+      zzLog('fetching cover…');
+      const cRes = await gmGet(d.coverUrl, 'blob');
+      coverBlob = cRes.response;
+    } catch (e) {
+      zzLog('cover fetch failed (pick manually): ' + e.message);
+    }
+  }
+  const genreNotes = [...(d.genres || []), ...(d.styles || [])].filter(Boolean);
+  const plan = {
+    release: { title: d.title, year: d.year, country: d.country, genres: [] },
+    coverBlob,
+    coverName: 'cover.jpg',
+    tracks,
+    support: d.supportUrl ? [d.supportUrl] : [],
+    artists: d.artists || [],
+    label: (d.labels || [])[0] || null,
+    notes: genreNotes.length ? `Discogs genres/styles: ${genreNotes.join(', ')} — closest picked manually.` : null,
+  };
+  zzLog('filling… (genres/countries left for manual pick when unsure)');
+  await fillAll(plan, zzLog);
+}
+
+function boot() {
+  const maybeMount = () => {
+    if (document.querySelector('[data-testid="contribute-track-form"]')) {
+      mountPanel({ onFetch, onFill });
+      return true;
+    }
+    return false;
+  };
+  if (maybeMount()) return;
+  const obs = new MutationObserver(() => {
+    if (maybeMount()) obs.disconnect();
+  });
+  obs.observe(document.documentElement, { childList: true, subtree: true });
+}
+
+boot();

@@ -1,0 +1,9 @@
+node_modules/
+*.log
+out/
+.DS_Store
+# never commit credentials, session dumps, or account HTML
+*creds*
+*storageState*
+add-release.html
+form-structure.json
