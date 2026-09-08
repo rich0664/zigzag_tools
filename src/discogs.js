@@ -155,4 +155,87 @@ function parseDiscogs(html, url) {
   return data;
 }
 
-export { discogsIdFromUrl, parseDiscogs, splitArtistTitle };
+function apiUrlFor(id) {
+  if (!id) return null;
+  return `https://api.discogs.com/${id.kind === 'master' ? 'masters' : 'releases'}/${id.id}`;
+}
+
+// Discogs API names carry disambiguation numbers: "Name (2)". Strip them.
+function cleanApiName(s) {
+  return String(s || '').replace(/\s+\(\d+\)$/, '').trim();
+}
+
+function apiArtists(j) {
+  return (j.artists || []).map((a) => cleanApiName(a.name)).filter(Boolean);
+}
+
+function apiYear(j) {
+  if (j.year) return String(j.year);
+  const m = String(j.released || '').match(/\d{4}/);
+  return m ? m[0] : null;
+}
+
+function apiTracks(j) {
+  return (j.tracklist || [])
+    .filter((t) => t && t.title && (!t.type_ || t.type_ === 'track'))
+    .map((t) => String(t.title).trim())
+    .filter(Boolean);
+}
+
+function apiCover(j) {
+  const imgs = j.images || [];
+  const primary = imgs.find((i) => i.type === 'primary') || imgs[0];
+  return (primary && (primary.uri || primary.uri150)) || null;
+}
+
+function parseReleaseApi(j, url) {
+  return {
+    title: j.title || null,
+    artists: apiArtists(j),
+    year: apiYear(j),
+    country: j.country || null,
+    formats: (j.formats || []).map((f) => f.name).filter(Boolean),
+    genres: (j.genres || []).filter((g) => typeof g === 'string'),
+    styles: (j.styles || []).filter((s) => typeof s === 'string'),
+    labels: (j.labels || []).map((l) => cleanApiName(l.name)).filter(Boolean),
+    coverUrl: apiCover(j),
+    tracks: apiTracks(j),
+    supportUrl: url,
+    debug: { strategies: ['api:release'], id: discogsIdFromUrl(url) },
+  };
+}
+
+function parseMasterApi(j, url) {
+  const d = parseReleaseApi(
+    { ...j, labels: [], country: j.country || null, formats: j.formats || [] },
+    url,
+  );
+  d.debug.strategies = ['api:master'];
+  d.mainReleaseId = j.main_release || null;
+  return d;
+}
+
+// Minimal ISO-code -> English-name map for the country chip field.
+// Unmapped codes fall through to manual pick (logged).
+const COUNTRY_NAMES = {
+  US: 'United States', UK: 'United Kingdom', GB: 'United Kingdom',
+  DE: 'Germany', FR: 'France', JP: 'Japan', CA: 'Canada', AU: 'Australia',
+  IT: 'Italy', ES: 'Spain', NL: 'Netherlands', BE: 'Belgium', CH: 'Switzerland',
+  AT: 'Austria', SE: 'Sweden', NO: 'Norway', DK: 'Denmark', FI: 'Finland',
+  IE: 'Ireland', PT: 'Portugal', GR: 'Greece', PL: 'Poland', CZ: 'Czech Republic',
+  HU: 'Hungary', RO: 'Romania', BG: 'Bulgaria', HR: 'Croatia', RS: 'Serbia',
+  UA: 'Ukraine', RU: 'Russia', BY: 'Belarus', BR: 'Brazil', AR: 'Argentina',
+  MX: 'Mexico', CL: 'Chile', CO: 'Colombia', PE: 'Peru', KR: 'South Korea',
+  CN: 'China', TW: 'Taiwan', IN: 'India', NZ: 'New Zealand', ZA: 'South Africa',
+  IL: 'Israel', TR: 'Turkey', IS: 'Iceland', LU: 'Luxembourg', EE: 'Estonia',
+  LV: 'Latvia', LT: 'Lithuania', SK: 'Slovakia', SI: 'Slovenia',
+};
+
+function countryName(code) {
+  if (!code) return null;
+  const c = String(code).trim();
+  if (c.length !== 2) return c; // already a name
+  return COUNTRY_NAMES[c.toUpperCase()] || c;
+}
+
+export { discogsIdFromUrl, parseDiscogs, parseReleaseApi, parseMasterApi, splitArtistTitle, countryName, apiUrlFor };

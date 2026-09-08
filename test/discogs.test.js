@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { discogsIdFromUrl, parseDiscogs, splitArtistTitle } from '../src/discogs.js';
+import { discogsIdFromUrl, parseDiscogs, parseReleaseApi, parseMasterApi, splitArtistTitle, countryName, apiUrlFor } from '../src/discogs.js';
 
 const LD_PAGE = `<html><head>
 <meta property="og:title" content="The Brave Little Abacus – Just Got Back From The Discomfort—We're Alright" />
@@ -66,5 +66,62 @@ describe('splitArtistTitle', () => {
   it('splits on dashes', () => {
     assert.deepEqual(splitArtistTitle('A – B'), { artists: ['A'], title: 'B' });
     assert.deepEqual(splitArtistTitle('Just A Title'), { artists: [], title: 'Just A Title' });
+  });
+});
+
+const API_RELEASE = {
+  title: 'Just Got Back From The Discomfort—We’re Alright',
+  artists: [{ name: 'The Brave Little Abacus' }],
+  year: 2010,
+  country: 'US',
+  labels: [{ name: 'Greater Than Collective' }],
+  formats: [{ name: 'CD', descriptions: ['Album'] }],
+  genres: ['Rock'],
+  styles: ['Emo', 'Math Rock'],
+  images: [{ type: 'primary', uri: 'https://api-img.discogs.com/full.jpg', uri150: 'https://api-img.discogs.com/small.jpg' }],
+  tracklist: [
+    { position: '1', title: 'Pile! No Pile! Pile!', duration: '2:30' },
+    { position: '', title: 'B', type_: 'heading' },
+    { position: '2', title: 'Bug-Infested Floorboards', duration: '3:00' },
+  ],
+};
+
+describe('parseReleaseApi', () => {
+  it('extracts everything, skips headings, strips nothing needed', () => {
+    const d = parseReleaseApi(API_RELEASE, 'https://www.discogs.com/release/7456635-x');
+    assert.equal(d.title, 'Just Got Back From The Discomfort—We’re Alright');
+    assert.deepEqual(d.artists, ['The Brave Little Abacus']);
+    assert.equal(d.year, '2010');
+    assert.equal(d.country, 'US');
+    assert.deepEqual(d.labels, ['Greater Than Collective']);
+    assert.deepEqual(d.formats, ['CD']);
+    assert.deepEqual(d.genres, ['Rock']);
+    assert.deepEqual(d.styles, ['Emo', 'Math Rock']);
+    assert.equal(d.coverUrl, 'https://api-img.discogs.com/full.jpg');
+    assert.deepEqual(d.tracks, ['Pile! No Pile! Pile!', 'Bug-Infested Floorboards']);
+    assert.deepEqual(d.debug.strategies, ['api:release']);
+  });
+
+  it('strips disambiguation numbers and falls back to released date', () => {
+    const d = parseReleaseApi({ artists: [{ name: 'Foo (2)' }], released: '1999-05-01', tracklist: [] }, 'https://www.discogs.com/release/1-x');
+    assert.deepEqual(d.artists, ['Foo']);
+    assert.equal(d.year, '1999');
+  });
+});
+
+describe('countryName', () => {
+  it('maps common codes, passes names through', () => {
+    assert.equal(countryName('US'), 'United States');
+    assert.equal(countryName('JP'), 'Japan');
+    assert.equal(countryName('United States'), 'United States');
+    assert.equal(countryName(null), null);
+  });
+});
+
+describe('apiUrlFor', () => {
+  it('builds release/master endpoints', () => {
+    assert.equal(apiUrlFor({ kind: 'release', id: '7456635' }), 'https://api.discogs.com/releases/7456635');
+    assert.equal(apiUrlFor({ kind: 'master', id: '123' }), 'https://api.discogs.com/masters/123');
+    assert.equal(apiUrlFor(null), null);
   });
 });

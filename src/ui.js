@@ -79,6 +79,7 @@ function copyDebugDump() {
     discogs: ZZ.state.discogs && { ...ZZ.state.discogs, tracks: ZZ.state.discogs.tracks?.length },
     videos: ZZ.state.videos.length,
     matches: ZZ.state.matches.map((m) => ({ track: m.track, video: m.video?.id || null, score: m.score })),
+    htmlSnippet: ZZ.state.discogsHtmlSnippet || null,
     log: ZZ.state.log,
   };
   const text = JSON.stringify(dump, null, 2);

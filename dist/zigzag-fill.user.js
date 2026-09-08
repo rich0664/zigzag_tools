@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         zig-zag release filler
 // @namespace    zigzagTools
-// @version      0.1.0
+// @version      0.2.0
 // @description  Fill the zig-zag.fm Add-a-release form from a Discogs link + YouTube playlist link. Never submits.
 // @match        https://www.zig-zag.fm/contributors*
 // @grant        GM_xmlhttpRequest
 // @connect      discogs.com
 // @connect      www.discogs.com
 // @connect      api-img.discogs.com
+// @connect      api.discogs.com
 // @connect      www.youtube.com
 // @run-at       document-idle
 // ==/UserScript==
@@ -168,6 +169,89 @@ function parseDiscogs(html, url) {
     }
   }
   return data;
+}
+
+function apiUrlFor(id) {
+  if (!id) return null;
+  return `https://api.discogs.com/${id.kind === 'master' ? 'masters' : 'releases'}/${id.id}`;
+}
+
+// Discogs API names carry disambiguation numbers: "Name (2)". Strip them.
+function cleanApiName(s) {
+  return String(s || '').replace(/\s+\(\d+\)$/, '').trim();
+}
+
+function apiArtists(j) {
+  return (j.artists || []).map((a) => cleanApiName(a.name)).filter(Boolean);
+}
+
+function apiYear(j) {
+  if (j.year) return String(j.year);
+  const m = String(j.released || '').match(/\d{4}/);
+  return m ? m[0] : null;
+}
+
+function apiTracks(j) {
+  return (j.tracklist || [])
+    .filter((t) => t && t.title && (!t.type_ || t.type_ === 'track'))
+    .map((t) => String(t.title).trim())
+    .filter(Boolean);
+}
+
+function apiCover(j) {
+  const imgs = j.images || [];
+  const primary = imgs.find((i) => i.type === 'primary') || imgs[0];
+  return (primary && (primary.uri || primary.uri150)) || null;
+}
+
+function parseReleaseApi(j, url) {
+  return {
+    title: j.title || null,
+    artists: apiArtists(j),
+    year: apiYear(j),
+    country: j.country || null,
+    formats: (j.formats || []).map((f) => f.name).filter(Boolean),
+    genres: (j.genres || []).filter((g) => typeof g === 'string'),
+    styles: (j.styles || []).filter((s) => typeof s === 'string'),
+    labels: (j.labels || []).map((l) => cleanApiName(l.name)).filter(Boolean),
+    coverUrl: apiCover(j),
+    tracks: apiTracks(j),
+    supportUrl: url,
+    debug: { strategies: ['api:release'], id: discogsIdFromUrl(url) },
+  };
+}
+
+function parseMasterApi(j, url) {
+  const d = parseReleaseApi(
+    { ...j, labels: [], country: j.country || null, formats: j.formats || [] },
+    url,
+  );
+  d.debug.strategies = ['api:master'];
+  d.mainReleaseId = j.main_release || null;
+  return d;
+}
+
+// Minimal ISO-code -> English-name map for the country chip field.
+// Unmapped codes fall through to manual pick (logged).
+const COUNTRY_NAMES = {
+  US: 'United States', UK: 'United Kingdom', GB: 'United Kingdom',
+  DE: 'Germany', FR: 'France', JP: 'Japan', CA: 'Canada', AU: 'Australia',
+  IT: 'Italy', ES: 'Spain', NL: 'Netherlands', BE: 'Belgium', CH: 'Switzerland',
+  AT: 'Austria', SE: 'Sweden', NO: 'Norway', DK: 'Denmark', FI: 'Finland',
+  IE: 'Ireland', PT: 'Portugal', GR: 'Greece', PL: 'Poland', CZ: 'Czech Republic',
+  HU: 'Hungary', RO: 'Romania', BG: 'Bulgaria', HR: 'Croatia', RS: 'Serbia',
+  UA: 'Ukraine', RU: 'Russia', BY: 'Belarus', BR: 'Brazil', AR: 'Argentina',
+  MX: 'Mexico', CL: 'Chile', CO: 'Colombia', PE: 'Peru', KR: 'South Korea',
+  CN: 'China', TW: 'Taiwan', IN: 'India', NZ: 'New Zealand', ZA: 'South Africa',
+  IL: 'Israel', TR: 'Turkey', IS: 'Iceland', LU: 'Luxembourg', EE: 'Estonia',
+  LV: 'Latvia', LT: 'Lithuania', SK: 'Slovakia', SI: 'Slovenia',
+};
+
+function countryName(code) {
+  if (!code) return null;
+  const c = String(code).trim();
+  if (c.length !== 2) return c; // already a name
+  return COUNTRY_NAMES[c.toUpperCase()] || c;
 }
 
 /* ---- youtube.js ---- */
@@ -463,7 +547,11 @@ async function ensureTrackRows(n, log) {
 }
 
 async function fillTracks(tracks, log) {
-  if (!tracks.length) return true;
+  if (!tracks.length) {
+    log('no tracks parsed — nothing to fill (see debug dump)');
+    return true;
+  }
+  log(`track rows before: ${trackRows().length}, need ${tracks.length}`);
   if (!(await ensureTrackRows(tracks.length, log))) return false;
   const rows = trackRows();
   for (let i = 0; i < tracks.length; i++) {
@@ -659,6 +747,7 @@ function copyDebugDump() {
     discogs: ZZ.state.discogs && { ...ZZ.state.discogs, tracks: ZZ.state.discogs.tracks?.length },
     videos: ZZ.state.videos.length,
     matches: ZZ.state.matches.map((m) => ({ track: m.track, video: m.video?.id || null, score: m.score })),
+    htmlSnippet: ZZ.state.discogsHtmlSnippet || null,
     log: ZZ.state.log,
   };
   const text = JSON.stringify(dump, null, 2);
@@ -706,6 +795,46 @@ function gmGet(url, responseType) {
   });
 }
 
+async function fetchDiscogsData(dUrl) {
+  const id = discogsIdFromUrl(dUrl);
+  if (id) {
+    try {
+      const apiRes = await gmGet(apiUrlFor(id));
+      const j = JSON.parse(apiRes.responseText);
+      if (id.kind === 'master' && j.main_release) {
+        const master = parseMasterApi(j, dUrl);
+        try {
+          // Main release carries the definitive country/labels/formats.
+          const mainRes = await gmGet(`https://api.discogs.com/releases/${j.main_release}`);
+          const main = parseReleaseApi(JSON.parse(mainRes.responseText), dUrl);
+          master.country = master.country || main.country;
+          master.labels = main.labels;
+          if (!master.formats.length) master.formats = main.formats;
+          if (!master.coverUrl) master.coverUrl = main.coverUrl;
+          master.debug.strategies.push('api:main-release');
+        } catch (e) {
+          master.debug.strategies.push('api:main-release-failed');
+        }
+        return { data: master, html: null };
+      }
+      return { data: parseReleaseApi(j, dUrl), html: null };
+    } catch (e) {
+      zzLog('discogs API failed, falling back to page scrape: ' + e.message);
+    }
+  }
+  const dRes = await gmGet(dUrl);
+  return { data: parseDiscogs(dRes.responseText, dUrl), html: dRes.responseText };
+}
+
+// First 1500 chars around the first "tracklist" mention in raw HTML —
+// included in the debug dump so the scraper fallback can be hardened.
+function tracklistSnippet(html) {
+  if (!html) return null;
+  const i = html.toLowerCase().indexOf('tracklist');
+  if (i < 0) return '(no "tracklist" in raw html)';
+  return html.slice(Math.max(0, i - 300), i + 1200);
+}
+
 async function onFetch() {
   const dUrl = document.querySelector('[data-testid="zz-discogs"]')?.value.trim();
   const pUrl = document.querySelector('[data-testid="zz-playlist"]')?.value.trim();
@@ -715,8 +844,9 @@ async function onFetch() {
   }
   try {
     zzLog('fetching Discogs…');
-    const dRes = await gmGet(dUrl);
-    ZZ.state.discogs = parseDiscogs(dRes.responseText, dUrl);
+    const { data, html } = await fetchDiscogsData(dUrl);
+    ZZ.state.discogs = data;
+    ZZ.state.discogsHtmlSnippet = tracklistSnippet(html);
     const d = ZZ.state.discogs;
     zzLog(`discogs: "${d.title}" — ${d.artists.join(', ')} (${d.year || 'no year'}), ${d.tracks.length} tracks [${d.debug.strategies.join(', ')}]`);
   } catch (e) {
@@ -774,7 +904,7 @@ async function onFill() {
   }
   const genreNotes = [...(d.genres || []), ...(d.styles || [])].filter(Boolean);
   const plan = {
-    release: { title: d.title, year: d.year, country: d.country, genres: [] },
+    release: { title: d.title, year: d.year, country: countryName(d.country), genres: [] },
     coverBlob,
     coverName: 'cover.jpg',
     tracks,

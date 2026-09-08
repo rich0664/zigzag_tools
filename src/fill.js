@@ -121,7 +121,11 @@ async function ensureTrackRows(n, log) {
 }
 
 async function fillTracks(tracks, log) {
-  if (!tracks.length) return true;
+  if (!tracks.length) {
+    log('no tracks parsed — nothing to fill (see debug dump)');
+    return true;
+  }
+  log(`track rows before: ${trackRows().length}, need ${tracks.length}`);
   if (!(await ensureTrackRows(tracks.length, log))) return false;
   const rows = trackRows();
   for (let i = 0; i < tracks.length; i++) {

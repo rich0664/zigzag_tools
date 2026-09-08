@@ -15,6 +15,46 @@ function gmGet(url, responseType) {
   });
 }
 
+async function fetchDiscogsData(dUrl) {
+  const id = discogsIdFromUrl(dUrl);
+  if (id) {
+    try {
+      const apiRes = await gmGet(apiUrlFor(id));
+      const j = JSON.parse(apiRes.responseText);
+      if (id.kind === 'master' && j.main_release) {
+        const master = parseMasterApi(j, dUrl);
+        try {
+          // Main release carries the definitive country/labels/formats.
+          const mainRes = await gmGet(`https://api.discogs.com/releases/${j.main_release}`);
+          const main = parseReleaseApi(JSON.parse(mainRes.responseText), dUrl);
+          master.country = master.country || main.country;
+          master.labels = main.labels;
+          if (!master.formats.length) master.formats = main.formats;
+          if (!master.coverUrl) master.coverUrl = main.coverUrl;
+          master.debug.strategies.push('api:main-release');
+        } catch (e) {
+          master.debug.strategies.push('api:main-release-failed');
+        }
+        return { data: master, html: null };
+      }
+      return { data: parseReleaseApi(j, dUrl), html: null };
+    } catch (e) {
+      zzLog('discogs API failed, falling back to page scrape: ' + e.message);
+    }
+  }
+  const dRes = await gmGet(dUrl);
+  return { data: parseDiscogs(dRes.responseText, dUrl), html: dRes.responseText };
+}
+
+// First 1500 chars around the first "tracklist" mention in raw HTML —
+// included in the debug dump so the scraper fallback can be hardened.
+function tracklistSnippet(html) {
+  if (!html) return null;
+  const i = html.toLowerCase().indexOf('tracklist');
+  if (i < 0) return '(no "tracklist" in raw html)';
+  return html.slice(Math.max(0, i - 300), i + 1200);
+}
+
 async function onFetch() {
   const dUrl = document.querySelector('[data-testid="zz-discogs"]')?.value.trim();
   const pUrl = document.querySelector('[data-testid="zz-playlist"]')?.value.trim();
@@ -24,8 +64,9 @@ async function onFetch() {
   }
   try {
     zzLog('fetching Discogs…');
-    const dRes = await gmGet(dUrl);
-    ZZ.state.discogs = parseDiscogs(dRes.responseText, dUrl);
+    const { data, html } = await fetchDiscogsData(dUrl);
+    ZZ.state.discogs = data;
+    ZZ.state.discogsHtmlSnippet = tracklistSnippet(html);
     const d = ZZ.state.discogs;
     zzLog(`discogs: "${d.title}" — ${d.artists.join(', ')} (${d.year || 'no year'}), ${d.tracks.length} tracks [${d.debug.strategies.join(', ')}]`);
   } catch (e) {
@@ -83,7 +124,7 @@ async function onFill() {
   }
   const genreNotes = [...(d.genres || []), ...(d.styles || [])].filter(Boolean);
   const plan = {
-    release: { title: d.title, year: d.year, country: d.country, genres: [] },
+    release: { title: d.title, year: d.year, country: countryName(d.country), genres: [] },
     coverBlob,
     coverName: 'cover.jpg',
     tracks,
