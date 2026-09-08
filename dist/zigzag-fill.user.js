@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         zig-zag release filler
 // @namespace    zigzagTools
-// @version      0.3.0
+// @version      0.3.1
 // @description  Fill the zig-zag.fm Add-a-release form from a Discogs link + YouTube playlist link. Never submits.
 // @match        https://www.zig-zag.fm/contributors*
 // @grant        GM_xmlhttpRequest
@@ -544,51 +544,51 @@ function trackRows() {
   return [...(zzRoot()?.querySelectorAll('[data-testid^="track-row-"]') || [])];
 }
 
-async function ensureTrackRows(n, log) {
-  const add = zzRoot()?.querySelector('[data-testid="add-track"]');
-  if (!add) {
-    log('add-track button not found');
-    return false;
+async function waitForCount(getCount, target, timeoutMs) {
+  const deadline = Date.now() + (timeoutMs || 3000);
+  while (Date.now() < deadline) {
+    if (getCount() >= target) return true;
+    await sleep(250);
   }
-  // Never click blindly: stop when rows stop growing.
-  let lastCount = -1;
-  let stalled = 0;
-  for (let guard = 0; guard < n + 5; guard++) {
-    const c = trackTitleInputs().length;
-    if (c >= n) return true;
-    if (c === lastCount) {
-      stalled++;
-      if (stalled >= 3) break;
-    } else {
-      stalled = 0;
-      lastCount = c;
-    }
-    add.click();
-    await sleep(450);
-  }
-  const c = trackTitleInputs().length;
-  log(`track rows: have ${c}, need ${n}`);
-  return c > 0;
+  return getCount() >= target;
 }
 
+// Interleaved: fill row i, then add row i+1, waiting for each row to render.
+// (Batch-adding first fails: rows render slowly and inputs shift around.)
 async function fillTracks(tracks, log) {
   if (!tracks.length) {
     log('no tracks parsed — nothing to fill (see debug dump)');
     return true;
   }
-  log(`track rows before: ${trackTitleInputs().length}, need ${tracks.length}`);
-  await ensureTrackRows(tracks.length, log);
-  const titles = trackTitleInputs();
-  const links = trackLinkInputs();
-  const n = Math.min(titles.length, tracks.length);
-  for (let i = 0; i < n; i++) {
-    // Discogs title wins on mismatch (per zig-zag mods).
-    if (tracks[i].title) setReactText(titles[i], tracks[i].title);
-    if (links[i] && tracks[i].url) setReactText(links[i], tracks[i].url);
-    await sleep(200);
+  const add = zzRoot()?.querySelector('[data-testid="add-track"]');
+  if (!add) {
+    log('add-track button not found');
+    return false;
   }
-  log(`filled ${n}/${tracks.length} track row(s)`);
-  if (n < tracks.length) log('remaining tracks left manual — paste the debug dump back');
+  let filled = 0;
+  for (let i = 0; i < tracks.length; i++) {
+    // Ensure row i exists (row 0 exists by default).
+    let present = await waitForCount(() => trackTitleInputs().length, i + 1, 1500);
+    for (let c = 0; c < 4 && !present; c++) {
+      add.click();
+      present = await waitForCount(() => trackTitleInputs().length, i + 1, 3000);
+    }
+    if (!present) {
+      log(`row ${i + 1} never rendered — stopping, rest manual`);
+      break;
+    }
+    const titles = trackTitleInputs();
+    const links = trackLinkInputs();
+    if (tracks[i].title && titles[i]) setReactText(titles[i], tracks[i].title);
+    if (tracks[i].url) {
+      if (links[i]) setReactText(links[i], tracks[i].url);
+      else log(`row ${i + 1}: link input not rendered yet`);
+    }
+    filled++;
+    await sleep(300);
+  }
+  log(`filled ${filled}/${tracks.length} track row(s)`);
+  if (filled < tracks.length) log('remaining tracks left manual — paste the debug dump back');
   return true;
 }
 
