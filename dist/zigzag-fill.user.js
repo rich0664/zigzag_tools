@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         zig-zag release filler
 // @namespace    zigzagTools
-// @version      0.2.0
+// @version      0.3.0
 // @description  Fill the zig-zag.fm Add-a-release form from a Discogs link + YouTube playlist link. Never submits.
 // @match        https://www.zig-zag.fm/contributors*
 // @grant        GM_xmlhttpRequest
@@ -525,6 +525,21 @@ async function fillCover(blob, filename, log) {
   return true;
 }
 
+function trackSection() {
+  return sectionFor('contribute-tracklist-section');
+}
+
+// Ordered inputs, independent of row wrapper testids.
+function trackTitleInputs() {
+  return [...(trackSection()?.querySelectorAll('input[placeholder="Track title"]') || [])];
+}
+
+function trackLinkInputs() {
+  return [...(trackSection()?.querySelectorAll('input') || [])].filter((el) =>
+    (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
+  );
+}
+
 function trackRows() {
   return [...(zzRoot()?.querySelectorAll('[data-testid^="track-row-"]') || [])];
 }
@@ -535,15 +550,25 @@ async function ensureTrackRows(n, log) {
     log('add-track button not found');
     return false;
   }
-  for (let guard = 0; guard < 60 && trackRows().length < n; guard++) {
+  // Never click blindly: stop when rows stop growing.
+  let lastCount = -1;
+  let stalled = 0;
+  for (let guard = 0; guard < n + 5; guard++) {
+    const c = trackTitleInputs().length;
+    if (c >= n) return true;
+    if (c === lastCount) {
+      stalled++;
+      if (stalled >= 3) break;
+    } else {
+      stalled = 0;
+      lastCount = c;
+    }
     add.click();
     await sleep(450);
   }
-  if (trackRows().length < n) {
-    log(`only ${trackRows().length}/${n} track rows created`);
-    return false;
-  }
-  return true;
+  const c = trackTitleInputs().length;
+  log(`track rows: have ${c}, need ${n}`);
+  return c > 0;
 }
 
 async function fillTracks(tracks, log) {
@@ -551,21 +576,19 @@ async function fillTracks(tracks, log) {
     log('no tracks parsed — nothing to fill (see debug dump)');
     return true;
   }
-  log(`track rows before: ${trackRows().length}, need ${tracks.length}`);
-  if (!(await ensureTrackRows(tracks.length, log))) return false;
-  const rows = trackRows();
-  for (let i = 0; i < tracks.length; i++) {
-    const row = rows[i];
-    const title = row.querySelector('input[placeholder="Track title"]');
-    const link = [...row.querySelectorAll('input')].find((el) =>
-      (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
-    );
+  log(`track rows before: ${trackTitleInputs().length}, need ${tracks.length}`);
+  await ensureTrackRows(tracks.length, log);
+  const titles = trackTitleInputs();
+  const links = trackLinkInputs();
+  const n = Math.min(titles.length, tracks.length);
+  for (let i = 0; i < n; i++) {
     // Discogs title wins on mismatch (per zig-zag mods).
-    if (title && tracks[i].title) setReactText(title, tracks[i].title);
-    if (link && tracks[i].url) setReactText(link, tracks[i].url);
+    if (tracks[i].title) setReactText(titles[i], tracks[i].title);
+    if (links[i] && tracks[i].url) setReactText(links[i], tracks[i].url);
     await sleep(200);
   }
-  log(`filled ${tracks.length} track row(s)`);
+  log(`filled ${n}/${tracks.length} track row(s)`);
+  if (n < tracks.length) log('remaining tracks left manual — paste the debug dump back');
   return true;
 }
 
@@ -892,6 +915,7 @@ async function onFill() {
     const video = sel ? ZZ.state.videos.find((v) => v.id === sel.value) : m.video;
     return { title: m.track, url: video ? video.url : null };
   });
+  zzLog(`filling ${tracks.length} track(s)…`);
   let coverBlob = null;
   if (d.coverUrl) {
     try {

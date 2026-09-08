@@ -112,6 +112,7 @@ async function onFill() {
     const video = sel ? ZZ.state.videos.find((v) => v.id === sel.value) : m.video;
     return { title: m.track, url: video ? video.url : null };
   });
+  zzLog(`filling ${tracks.length} track(s)…`);
   let coverBlob = null;
   if (d.coverUrl) {
     try {
