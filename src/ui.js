@@ -34,6 +34,12 @@ function panelHtml() {
   </div>`;
 }
 
+function matchColor(m) {
+  if (!m.video) return '#f88';
+  if (m.score >= 0.8) return '#8f8';
+  return '#fc6';
+}
+
 function renderPreview() {
   const { discogs, matches } = ZZ.state;
   const box = document.querySelector('[data-testid="zz-preview"]');
@@ -42,13 +48,27 @@ function renderPreview() {
     const opts = ZZ.state.videos
       .map((v) => `<option value="${v.id}" ${m.video && m.video.id === v.id ? 'selected' : ''}>${escapeHtml(v.title)}</option>`)
       .join('');
-    return `<div style="display:flex;gap:4px;align-items:center;margin-bottom:2px;">
-      <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(m.track)}">${i + 1}. ${escapeHtml(m.track)}</span>
-      <select data-testid="zz-match-${i}" style="flex:1;background:#222;color:#eee;border:1px solid #555;">${opts}</select>
-      <span style="color:${m.video ? '#8f8' : '#f88'}">${m.video ? m.score.toFixed(2) : '—'}</span>
+    const arrow = m.video ? `→ ${escapeHtml(m.video.title)}` : '→ no video (pick one)';
+    return `<div style="margin-bottom:4px;border-left:2px solid ${matchColor(m)};padding-left:4px;">
+      <div style="display:flex;gap:4px;align-items:center;">
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(m.track)}">${i + 1}. ${escapeHtml(m.track)}</span>
+        <select data-testid="zz-match-${i}" data-match-row="${i}" style="flex:1;background:#222;color:#eee;border:1px solid #555;">${opts}</select>
+        <span style="color:${matchColor(m)}">${m.video ? m.score.toFixed(2) : '—'}</span>
+      </div>
+      <div data-testid="zz-matchtitle-${i}" style="color:#aaa;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${arrow}</div>
     </div>`;
   }).join('');
   box.innerHTML = `<div style="margin-bottom:4px;"><b>${escapeHtml(discogs.title || '?')}</b> · ${escapeHtml((discogs.artists || []).join(', '))} · ${escapeHtml(discogs.year || '?')}</div>${rows}`;
+  box.querySelectorAll('select[data-match-row]').forEach((sel) => {
+    sel.addEventListener('change', () => {
+      const line = box.querySelector(`[data-testid="zz-matchtitle-${sel.dataset.matchRow}"]`);
+      const opt = sel.selectedOptions[0];
+      if (line && opt) {
+        line.textContent = `→ ${opt.textContent} (manual)`;
+        line.style.color = '#ccc';
+      }
+    });
+  });
   const fill = document.querySelector('[data-testid="zz-fill"]');
   if (fill) {
     fill.disabled = false;

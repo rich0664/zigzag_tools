@@ -123,7 +123,6 @@ async function onFill() {
       zzLog('cover fetch failed (pick manually): ' + e.message);
     }
   }
-  const genreNotes = [...(d.genres || []), ...(d.styles || [])].filter(Boolean);
   const plan = {
     release: { title: d.title, year: d.year, country: countryName(d.country), genres: [] },
     coverBlob,
@@ -132,7 +131,7 @@ async function onFill() {
     support: d.supportUrl ? [d.supportUrl] : [],
     artists: d.artists || [],
     label: (d.labels || [])[0] || null,
-    notes: genreNotes.length ? `Discogs genres/styles: ${genreNotes.join(', ')} — closest picked manually.` : null,
+    notes: null, // extra notes stay clear for the user
   };
   zzLog('filling… (genres/countries left for manual pick when unsure)');
   await fillAll(plan, zzLog);
