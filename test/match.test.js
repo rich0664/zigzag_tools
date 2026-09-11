@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalize, similarity, stripArtistPrefix, matchTracksToVideos } from '../src/match.js';
+import { normalize, similarity, stripArtistPrefix, matchTracksToVideos, planMerge } from '../src/match.js';
 
 describe('normalize/similarity', () => {
   it('ignores case, punctuation and parentheticals', () => {
@@ -23,6 +23,41 @@ describe('stripArtistPrefix', () => {
 
   it('leaves unrelated titles alone', () => {
     assert.equal(stripArtistPrefix('pile! no pile! pile!', ['The Brave Little Abacus']), 'pile! no pile! pile!');
+  });
+});
+
+describe('planMerge', () => {
+  const discogs = ['Intro', 'Song A', 'Song B', 'Outro'];
+
+  it('fills empty slots positionally and appends the rest', () => {
+    const existing = [{ title: 'Intro', link: 'u0' }, { title: '', link: '' }];
+    const p = planMerge(existing, discogs);
+    assert.deepEqual(p.matchedIdx, [0, -1]);
+    assert.deepEqual(p.fills, [{ tab: 1, track: 1 }]);
+    assert.deepEqual(p.appends, [2, 3]);
+  });
+
+  it('is idempotent on a synced form', () => {
+    const existing = discogs.map((t, i) => ({ title: t, link: `u${i}` }));
+    const p = planMerge(existing, discogs);
+    assert.deepEqual(p.fills, []);
+    assert.deepEqual(p.appends, []);
+  });
+
+  it('leaves half-filled rows alone and matches fuzzily', () => {
+    const existing = [{ title: 'song a (live)', link: 'ux' }, { title: '', link: '' }, { title: 'Outro', link: 'uy' }];
+    const p = planMerge(existing, discogs);
+    assert.equal(p.matchedIdx[0], 1);
+    assert.equal(p.matchedIdx[2], 3);
+    assert.deepEqual(p.fills, [{ tab: 1, track: 0 }]);
+    assert.deepEqual(p.appends, [2]);
+  });
+
+  it('does not treat link-only rows as empty', () => {
+    const existing = [{ title: '', link: 'https://www.youtube.com/watch?v=aaaaaaaaaaa' }];
+    const p = planMerge(existing, discogs);
+    assert.deepEqual(p.fills, []);
+    assert.deepEqual(p.appends, [0, 1, 2, 3]);
   });
 });
 

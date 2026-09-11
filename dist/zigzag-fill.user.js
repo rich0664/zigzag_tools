@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         zig-zag release filler
 // @namespace    zigzagTools
-// @version      0.4.1
+// @version      0.5.0
 // @description  Fill the zig-zag.fm Add-a-release form from a Discogs link + YouTube playlist link. Never submits.
-// @match        https://www.zig-zag.fm/contributors*
+// @match        https://www.zig-zag.fm/*
 // @grant        GM_xmlhttpRequest
 // @connect      discogs.com
 // @connect      www.discogs.com
@@ -400,8 +400,49 @@ function stripArtistPrefix(videoTitle, artistNames) {
   return videoTitle;
 }
 
-// Greedy 1:1 assignment: for each track (in order), pick the best unused video
-// above `threshold`. Returns [{track, video|null, score}].
+// Merge plan for topping up an existing release.
+// existing: [{title, link}] in current tab order (may contain empties).
+// discogsTracks: full tracklist in order.
+// Returns {matchedIdx, fills, appends}:
+// - matchedIdx[i] = discogs index already present at tab i, or -1.
+// - fills = [{tab, track}] empty slots to fill (positional when possible).
+// - appends = [discogsIdx] songs needing brand-new tabs.
+// Re-running on an already-synced form yields no fills/appends (idempotent).
+function planMerge(existing, discogsTracks, threshold = 0.4) {
+  const used = new Set();
+  const matchedIdx = existing.map((e) => {
+    if (!e.title.trim()) return -1;
+    let best = -1;
+    let bestScore = -1;
+    discogsTracks.forEach((t, j) => {
+      if (used.has(j)) return;
+      const s = similarity(e.title, t);
+      if (s > bestScore) {
+        bestScore = s;
+        best = j;
+      }
+    });
+    if (best >= 0 && bestScore >= threshold) {
+      used.add(best);
+      return best;
+    }
+    return -1;
+  });
+  const firstUnmatched = () => discogsTracks.findIndex((_, j) => !used.has(j));
+  const fills = [];
+  existing.forEach((e, i) => {
+    if (e.title.trim() || (e.link || '').trim()) return; // only truly empty slots
+    let track = -1;
+    if (i < discogsTracks.length && !used.has(i)) track = i; // positional
+    else track = firstUnmatched();
+    if (track >= 0) {
+      used.add(track);
+      fills.push({ tab: i, track });
+    }
+  });
+  const appends = discogsTracks.map((_, j) => j).filter((j) => !used.has(j));
+  return { matchedIdx, fills, appends };
+}
 function matchTracksToVideos(tracks, videos, artistNames, threshold = 0.4) {
   const used = new Set();
   return tracks.map((track) => {
@@ -565,6 +606,75 @@ function trackRow(i) {
   return zzRoot()?.querySelector(`[data-testid="track-row-${i}"]`) || null;
 }
 
+function trackTabIndices() {
+  return [...(zzRoot()?.querySelectorAll('[data-testid]') || [])]
+    .map((el) => el.getAttribute('data-testid'))
+    .filter((t) => /^track-tab-\d+$/.test(t || ''))
+    .map((t) => parseInt(t.split('-')[2], 10))
+    .sort((a, b) => a - b);
+}
+
+// Read the current tracklist in tab order (for Sync / Re-read modes).
+async function readExistingTracks(log) {
+  const out = [];
+  for (const i of trackTabIndices()) {
+    trackTab(i)?.click();
+    if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
+      log(`could not read tab ${i + 1}`);
+      out.push({ title: '', link: '' });
+      continue;
+    }
+    const row = trackRow(i);
+    out.push({
+      title: row.querySelector('input[placeholder="Track title"]')?.value || '',
+      link: [...row.querySelectorAll('input')].find((el) =>
+        (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='))?.value || '',
+    });
+  }
+  return out;
+}
+
+function addTrackButton() {
+  return zzRoot()?.querySelector('[data-testid="add-track"]') || null;
+}
+
+// Ensure tab i exists (creating it if needed). Returns the index or -1.
+async function ensureTab(i, log) {
+  if (trackTab(i)) return i;
+  const add = addTrackButton();
+  if (!add) {
+    log('add-track button not found');
+    return -1;
+  }
+  add.click();
+  if (!(await waitForTrue(() => !!trackTab(i), 4000))) {
+    log(`tab ${i + 1} never appeared`);
+    return -1;
+  }
+  return i;
+}
+
+// Select tab i and fill its (sole rendered) row. The link may be null
+// (title-only top-up); existing values are only overwritten when given.
+async function fillTab(i, title, url, log) {
+  trackTab(i)?.click();
+  if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
+    log(`row ${i + 1} never rendered`);
+    return false;
+  }
+  const row = trackRow(i);
+  const titleEl = row.querySelector('input[placeholder="Track title"]');
+  const linkEl = [...row.querySelectorAll('input')].find((el) =>
+    (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
+  );
+  // Discogs title wins on mismatch (per zig-zag mods).
+  if (title && titleEl) setReactText(titleEl, title);
+  if (url && linkEl) setReactText(linkEl, url);
+  else if (url && !linkEl) log(`row ${i + 1}: link input missing`);
+  await sleep(300);
+  return true;
+}
+
 // The form renders ONLY the active tab's row (other rows unmount, data stays
 // in React state). So: select tab i (creating it first if needed), wait for
 // its row, fill it, repeat.
@@ -573,36 +683,17 @@ async function fillTracks(tracks, log) {
     log('no tracks parsed — nothing to fill (see debug dump)');
     return true;
   }
-  const add = zzRoot()?.querySelector('[data-testid="add-track"]');
-  if (!add) {
-    log('add-track button not found');
-    return false;
-  }
   let filled = 0;
   for (let i = 0; i < tracks.length; i++) {
-    if (!trackTab(i)) {
-      add.click();
-      if (!(await waitForTrue(() => !!trackTab(i), 4000))) {
-        log(`tab ${i + 1} never appeared — stopping, rest manual`);
-        break;
-      }
-    }
-    trackTab(i).click();
-    if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
-      log(`row ${i + 1} never rendered — stopping, rest manual`);
+    if ((await ensureTab(i, log)) < 0) {
+      log('stopping, rest manual');
       break;
     }
-    const row = trackRow(i);
-    const title = row.querySelector('input[placeholder="Track title"]');
-    const link = [...row.querySelectorAll('input')].find((el) =>
-      (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
-    );
-    // Discogs title wins on mismatch (per zig-zag mods).
-    if (tracks[i].title && title) setReactText(title, tracks[i].title);
-    if (tracks[i].url && link) setReactText(link, tracks[i].url);
-    else if (tracks[i].url && !link) log(`row ${i + 1}: link input missing`);
-    filled++;
-    await sleep(300);
+    if (await fillTab(i, tracks[i].title, tracks[i].url, log)) filled++;
+    else {
+      log('stopping, rest manual');
+      break;
+    }
   }
   log(`filled ${filled}/${tracks.length} track row(s)`);
   if (filled < tracks.length) log('remaining tracks left manual — paste the debug dump back');
@@ -731,10 +822,17 @@ function panelHtml() {
     <div data-testid="zz-body">
       <input data-testid="zz-discogs" placeholder="Discogs release URL" style="width:100%;margin-bottom:4px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:4px;" />
       <input data-testid="zz-playlist" placeholder="YouTube playlist URL" style="width:100%;margin-bottom:4px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:4px;" />
-      <div style="display:flex;gap:4px;margin-bottom:6px;">
+      <div style="display:flex;gap:4px;margin-bottom:4px;">
         <button data-testid="zz-fetch" style="flex:1;background:#234;color:#fff;border:1px solid #555;border-radius:4px;padding:5px;">Fetch &amp; preview</button>
         <button data-testid="zz-fill" disabled style="flex:1;background:#333;color:#888;border:1px solid #555;border-radius:4px;padding:5px;">Fill form</button>
       </div>
+      <div style="display:flex;gap:4px;margin-bottom:6px;">
+        <button data-testid="zz-sync" disabled style="flex:1;background:#333;color:#888;border:1px solid #555;border-radius:4px;padding:5px;">Sync missing</button>
+        <button data-testid="zz-reread" style="flex:1;background:#333;color:#eee;border:1px solid #555;border-radius:4px;padding:5px;">Re-read form</button>
+      </div>
+      <label style="display:flex;gap:4px;align-items:center;margin-bottom:6px;color:#ccc;">
+        <input data-testid="zz-rename" type="checkbox" /> Rename existing tracks to Discogs titles
+      </label>
       <div data-testid="zz-preview" style="margin-bottom:6px;"></div>
       <div data-testid="zz-log" style="max-height:120px;overflow:auto;background:#000;border:1px solid #333;border-radius:4px;padding:4px;margin-bottom:6px;"></div>
       <button data-testid="zz-dump" style="width:100%;background:#333;color:#eee;border:1px solid #555;border-radius:4px;padding:4px;">Copy debug dump</button>
@@ -777,11 +875,13 @@ function renderPreview() {
       }
     });
   });
-  const fill = document.querySelector('[data-testid="zz-fill"]');
-  if (fill) {
-    fill.disabled = false;
-    fill.style.background = '#263';
-    fill.style.color = '#fff';
+  for (const [testid, color] of [['zz-fill', '#263'], ['zz-sync', '#254']]) {
+    const btn = document.querySelector(`[data-testid="${testid}"]`);
+    if (btn) {
+      btn.disabled = false;
+      btn.style.background = color;
+      btn.style.color = '#fff';
+    }
   }
 }
 
@@ -826,6 +926,8 @@ function mountPanel(handlers) {
   document.body.appendChild(wrap);
   wrap.querySelector('[data-testid="zz-fetch"]').addEventListener('click', handlers.onFetch);
   wrap.querySelector('[data-testid="zz-fill"]').addEventListener('click', handlers.onFill);
+  wrap.querySelector('[data-testid="zz-sync"]').addEventListener('click', handlers.onSync);
+  wrap.querySelector('[data-testid="zz-reread"]').addEventListener('click', handlers.onReread);
   wrap.querySelector('[data-testid="zz-dump"]').addEventListener('click', copyDebugDump);
   const body = wrap.querySelector('[data-testid="zz-body"]');
   const btn = wrap.querySelector('[data-testid="zz-collapse"]');
@@ -977,18 +1079,97 @@ async function onFill() {
   await fillAll(plan, zzLog);
 }
 
-function boot() {
-  const maybeMount = () => {
-    if (document.querySelector('[data-testid="contribute-track-form"]')) {
-      mountPanel({ onFetch, onFill });
-      return true;
-    }
-    return false;
+async function onSync() {
+  const d = ZZ.state.discogs;
+  if (!d || !d.tracks.length) {
+    zzLog('fetch a Discogs release + playlist first');
+    return;
+  }
+  const rename = !!document.querySelector('[data-testid="zz-rename"]')?.checked;
+  zzLog('reading existing rows…');
+  const existing = await readExistingTracks(zzLog);
+  zzLog(`form has ${existing.length} row(s)`);
+  // Never offer videos that are already linked — avoids the duplicate check.
+  const usedVideoIds = new Set(existing.map((e) => videoIdFromUrl(e.link)).filter(Boolean));
+  const freshVideos = ZZ.state.videos.filter((v) => !usedVideoIds.has(v.id));
+  const matches = matchTracksToVideos(d.tracks, freshVideos, d.artists);
+  const videoFor = (ti) => {
+    const m = matches[ti];
+    return (m && m.video) || null;
   };
-  if (maybeMount()) return;
-  const obs = new MutationObserver(() => {
-    if (maybeMount()) obs.disconnect();
+  const plan = planMerge(existing, d.tracks);
+  const present = plan.matchedIdx.filter((x) => x >= 0).length;
+  zzLog(`${present} already present, ${plan.fills.length} empty slot(s), ${plan.appends.length} to append`);
+  for (const f of plan.fills) {
+    const v = videoFor(f.track);
+    await fillTab(f.tab, d.tracks[f.track], v ? v.url : null, zzLog);
+  }
+  for (const ti of plan.appends) {
+    const idx = Math.max(...trackTabIndices(), -1) + 1;
+    if ((await ensureTab(idx, zzLog)) < 0) {
+      zzLog('stopping, rest manual');
+      break;
+    }
+    const v = videoFor(ti);
+    await fillTab(idx, d.tracks[ti], v ? v.url : null, zzLog);
+  }
+  if (rename) {
+    let renamed = 0;
+    for (let i = 0; i < existing.length; i++) {
+      const ti = plan.matchedIdx[i];
+      if (ti >= 0 && existing[i].title !== d.tracks[ti]) {
+        await fillTab(i, d.tracks[ti], null, zzLog);
+        renamed++;
+      }
+    }
+    zzLog(`renamed ${renamed} row(s) to Discogs titles`);
+  }
+  await sleep(600);
+  const remaining = remainingChecklist();
+  log(remaining.length ? `still needed (${remaining.length}): ${remaining.join(' | ')}` : 'checklist clear — review and submit manually');
+}
+
+// Re-read the form (e.g. after drag-reordering tabs) and rebuild the
+// preview in current tab order, keeping existing video assignments.
+async function onReread() {
+  if (!zzRoot()) {
+    zzLog('form not open');
+    return;
+  }
+  const existing = await readExistingTracks(zzLog);
+  const byVideo = new Map(ZZ.state.videos.map((v) => [v.id, v]));
+  const dTracks = ZZ.state.discogs?.tracks || [];
+  ZZ.state.matches = existing.map((e, i) => {
+    const video = byVideo.get(videoIdFromUrl(e.link) || '');
+    if (video) return { track: e.title || video.title, video, score: 1 };
+    let best = null;
+    let bestScore = -1;
+    dTracks.forEach((t, j) => {
+      const s = similarity(e.title, t);
+      if (s > bestScore) {
+        bestScore = s;
+        best = { track: t, video: null, score: s };
+      }
+    });
+    if (best && bestScore >= 0.4) return best;
+    return { track: e.title || `(empty slot ${i + 1})`, video: null, score: 0 };
   });
+  zzLog(`re-read ${existing.length} row(s) in current order`);
+  renderPreview();
+}
+
+function boot() {
+  const panelPresent = () => !!document.querySelector('[data-testid="zz-panel"]');
+  const tick = () => {
+    if (document.querySelector('[data-testid="contribute-track-form"]')) {
+      if (!panelPresent()) mountPanel({ onFetch, onFill, onSync, onReread });
+    } else if (panelPresent()) {
+      // SPA-navigated away: drop the panel, keep fetched state.
+      document.querySelector('[data-testid="zz-panel"]').remove();
+    }
+  };
+  tick();
+  const obs = new MutationObserver(tick);
   obs.observe(document.documentElement, { childList: true, subtree: true });
 }
 

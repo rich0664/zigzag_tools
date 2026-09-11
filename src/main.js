@@ -137,18 +137,97 @@ async function onFill() {
   await fillAll(plan, zzLog);
 }
 
-function boot() {
-  const maybeMount = () => {
-    if (document.querySelector('[data-testid="contribute-track-form"]')) {
-      mountPanel({ onFetch, onFill });
-      return true;
-    }
-    return false;
+async function onSync() {
+  const d = ZZ.state.discogs;
+  if (!d || !d.tracks.length) {
+    zzLog('fetch a Discogs release + playlist first');
+    return;
+  }
+  const rename = !!document.querySelector('[data-testid="zz-rename"]')?.checked;
+  zzLog('reading existing rows…');
+  const existing = await readExistingTracks(zzLog);
+  zzLog(`form has ${existing.length} row(s)`);
+  // Never offer videos that are already linked — avoids the duplicate check.
+  const usedVideoIds = new Set(existing.map((e) => videoIdFromUrl(e.link)).filter(Boolean));
+  const freshVideos = ZZ.state.videos.filter((v) => !usedVideoIds.has(v.id));
+  const matches = matchTracksToVideos(d.tracks, freshVideos, d.artists);
+  const videoFor = (ti) => {
+    const m = matches[ti];
+    return (m && m.video) || null;
   };
-  if (maybeMount()) return;
-  const obs = new MutationObserver(() => {
-    if (maybeMount()) obs.disconnect();
+  const plan = planMerge(existing, d.tracks);
+  const present = plan.matchedIdx.filter((x) => x >= 0).length;
+  zzLog(`${present} already present, ${plan.fills.length} empty slot(s), ${plan.appends.length} to append`);
+  for (const f of plan.fills) {
+    const v = videoFor(f.track);
+    await fillTab(f.tab, d.tracks[f.track], v ? v.url : null, zzLog);
+  }
+  for (const ti of plan.appends) {
+    const idx = Math.max(...trackTabIndices(), -1) + 1;
+    if ((await ensureTab(idx, zzLog)) < 0) {
+      zzLog('stopping, rest manual');
+      break;
+    }
+    const v = videoFor(ti);
+    await fillTab(idx, d.tracks[ti], v ? v.url : null, zzLog);
+  }
+  if (rename) {
+    let renamed = 0;
+    for (let i = 0; i < existing.length; i++) {
+      const ti = plan.matchedIdx[i];
+      if (ti >= 0 && existing[i].title !== d.tracks[ti]) {
+        await fillTab(i, d.tracks[ti], null, zzLog);
+        renamed++;
+      }
+    }
+    zzLog(`renamed ${renamed} row(s) to Discogs titles`);
+  }
+  await sleep(600);
+  const remaining = remainingChecklist();
+  log(remaining.length ? `still needed (${remaining.length}): ${remaining.join(' | ')}` : 'checklist clear — review and submit manually');
+}
+
+// Re-read the form (e.g. after drag-reordering tabs) and rebuild the
+// preview in current tab order, keeping existing video assignments.
+async function onReread() {
+  if (!zzRoot()) {
+    zzLog('form not open');
+    return;
+  }
+  const existing = await readExistingTracks(zzLog);
+  const byVideo = new Map(ZZ.state.videos.map((v) => [v.id, v]));
+  const dTracks = ZZ.state.discogs?.tracks || [];
+  ZZ.state.matches = existing.map((e, i) => {
+    const video = byVideo.get(videoIdFromUrl(e.link) || '');
+    if (video) return { track: e.title || video.title, video, score: 1 };
+    let best = null;
+    let bestScore = -1;
+    dTracks.forEach((t, j) => {
+      const s = similarity(e.title, t);
+      if (s > bestScore) {
+        bestScore = s;
+        best = { track: t, video: null, score: s };
+      }
+    });
+    if (best && bestScore >= 0.4) return best;
+    return { track: e.title || `(empty slot ${i + 1})`, video: null, score: 0 };
   });
+  zzLog(`re-read ${existing.length} row(s) in current order`);
+  renderPreview();
+}
+
+function boot() {
+  const panelPresent = () => !!document.querySelector('[data-testid="zz-panel"]');
+  const tick = () => {
+    if (document.querySelector('[data-testid="contribute-track-form"]')) {
+      if (!panelPresent()) mountPanel({ onFetch, onFill, onSync, onReread });
+    } else if (panelPresent()) {
+      // SPA-navigated away: drop the panel, keep fetched state.
+      document.querySelector('[data-testid="zz-panel"]').remove();
+    }
+  };
+  tick();
+  const obs = new MutationObserver(tick);
   obs.observe(document.documentElement, { childList: true, subtree: true });
 }
 

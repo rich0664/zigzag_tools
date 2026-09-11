@@ -139,6 +139,75 @@ function trackRow(i) {
   return zzRoot()?.querySelector(`[data-testid="track-row-${i}"]`) || null;
 }
 
+function trackTabIndices() {
+  return [...(zzRoot()?.querySelectorAll('[data-testid]') || [])]
+    .map((el) => el.getAttribute('data-testid'))
+    .filter((t) => /^track-tab-\d+$/.test(t || ''))
+    .map((t) => parseInt(t.split('-')[2], 10))
+    .sort((a, b) => a - b);
+}
+
+// Read the current tracklist in tab order (for Sync / Re-read modes).
+async function readExistingTracks(log) {
+  const out = [];
+  for (const i of trackTabIndices()) {
+    trackTab(i)?.click();
+    if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
+      log(`could not read tab ${i + 1}`);
+      out.push({ title: '', link: '' });
+      continue;
+    }
+    const row = trackRow(i);
+    out.push({
+      title: row.querySelector('input[placeholder="Track title"]')?.value || '',
+      link: [...row.querySelectorAll('input')].find((el) =>
+        (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='))?.value || '',
+    });
+  }
+  return out;
+}
+
+function addTrackButton() {
+  return zzRoot()?.querySelector('[data-testid="add-track"]') || null;
+}
+
+// Ensure tab i exists (creating it if needed). Returns the index or -1.
+async function ensureTab(i, log) {
+  if (trackTab(i)) return i;
+  const add = addTrackButton();
+  if (!add) {
+    log('add-track button not found');
+    return -1;
+  }
+  add.click();
+  if (!(await waitForTrue(() => !!trackTab(i), 4000))) {
+    log(`tab ${i + 1} never appeared`);
+    return -1;
+  }
+  return i;
+}
+
+// Select tab i and fill its (sole rendered) row. The link may be null
+// (title-only top-up); existing values are only overwritten when given.
+async function fillTab(i, title, url, log) {
+  trackTab(i)?.click();
+  if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
+    log(`row ${i + 1} never rendered`);
+    return false;
+  }
+  const row = trackRow(i);
+  const titleEl = row.querySelector('input[placeholder="Track title"]');
+  const linkEl = [...row.querySelectorAll('input')].find((el) =>
+    (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
+  );
+  // Discogs title wins on mismatch (per zig-zag mods).
+  if (title && titleEl) setReactText(titleEl, title);
+  if (url && linkEl) setReactText(linkEl, url);
+  else if (url && !linkEl) log(`row ${i + 1}: link input missing`);
+  await sleep(300);
+  return true;
+}
+
 // The form renders ONLY the active tab's row (other rows unmount, data stays
 // in React state). So: select tab i (creating it first if needed), wait for
 // its row, fill it, repeat.
@@ -147,36 +216,17 @@ async function fillTracks(tracks, log) {
     log('no tracks parsed — nothing to fill (see debug dump)');
     return true;
   }
-  const add = zzRoot()?.querySelector('[data-testid="add-track"]');
-  if (!add) {
-    log('add-track button not found');
-    return false;
-  }
   let filled = 0;
   for (let i = 0; i < tracks.length; i++) {
-    if (!trackTab(i)) {
-      add.click();
-      if (!(await waitForTrue(() => !!trackTab(i), 4000))) {
-        log(`tab ${i + 1} never appeared — stopping, rest manual`);
-        break;
-      }
-    }
-    trackTab(i).click();
-    if (!(await waitForTrue(() => !!trackRow(i), 3000))) {
-      log(`row ${i + 1} never rendered — stopping, rest manual`);
+    if ((await ensureTab(i, log)) < 0) {
+      log('stopping, rest manual');
       break;
     }
-    const row = trackRow(i);
-    const title = row.querySelector('input[placeholder="Track title"]');
-    const link = [...row.querySelectorAll('input')].find((el) =>
-      (el.placeholder || '').startsWith('https://www.youtube.com/watch?v='),
-    );
-    // Discogs title wins on mismatch (per zig-zag mods).
-    if (tracks[i].title && title) setReactText(title, tracks[i].title);
-    if (tracks[i].url && link) setReactText(link, tracks[i].url);
-    else if (tracks[i].url && !link) log(`row ${i + 1}: link input missing`);
-    filled++;
-    await sleep(300);
+    if (await fillTab(i, tracks[i].title, tracks[i].url, log)) filled++;
+    else {
+      log('stopping, rest manual');
+      break;
+    }
   }
   log(`filled ${filled}/${tracks.length} track row(s)`);
   if (filled < tracks.length) log('remaining tracks left manual — paste the debug dump back');
@@ -279,4 +329,4 @@ async function fillAll(plan, onLog) {
   return { ok: true, remaining };
 }
 
-export { fillAll, remainingChecklist, zzRoot };
+export { fillAll, fillTab, ensureTab, readExistingTracks, remainingChecklist, zzRoot };

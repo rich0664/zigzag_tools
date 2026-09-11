@@ -45,8 +45,49 @@ function stripArtistPrefix(videoTitle, artistNames) {
   return videoTitle;
 }
 
-// Greedy 1:1 assignment: for each track (in order), pick the best unused video
-// above `threshold`. Returns [{track, video|null, score}].
+// Merge plan for topping up an existing release.
+// existing: [{title, link}] in current tab order (may contain empties).
+// discogsTracks: full tracklist in order.
+// Returns {matchedIdx, fills, appends}:
+// - matchedIdx[i] = discogs index already present at tab i, or -1.
+// - fills = [{tab, track}] empty slots to fill (positional when possible).
+// - appends = [discogsIdx] songs needing brand-new tabs.
+// Re-running on an already-synced form yields no fills/appends (idempotent).
+function planMerge(existing, discogsTracks, threshold = 0.4) {
+  const used = new Set();
+  const matchedIdx = existing.map((e) => {
+    if (!e.title.trim()) return -1;
+    let best = -1;
+    let bestScore = -1;
+    discogsTracks.forEach((t, j) => {
+      if (used.has(j)) return;
+      const s = similarity(e.title, t);
+      if (s > bestScore) {
+        bestScore = s;
+        best = j;
+      }
+    });
+    if (best >= 0 && bestScore >= threshold) {
+      used.add(best);
+      return best;
+    }
+    return -1;
+  });
+  const firstUnmatched = () => discogsTracks.findIndex((_, j) => !used.has(j));
+  const fills = [];
+  existing.forEach((e, i) => {
+    if (e.title.trim() || (e.link || '').trim()) return; // only truly empty slots
+    let track = -1;
+    if (i < discogsTracks.length && !used.has(i)) track = i; // positional
+    else track = firstUnmatched();
+    if (track >= 0) {
+      used.add(track);
+      fills.push({ tab: i, track });
+    }
+  });
+  const appends = discogsTracks.map((_, j) => j).filter((j) => !used.has(j));
+  return { matchedIdx, fills, appends };
+}
 function matchTracksToVideos(tracks, videos, artistNames, threshold = 0.4) {
   const used = new Set();
   return tracks.map((track) => {
@@ -68,4 +109,4 @@ function matchTracksToVideos(tracks, videos, artistNames, threshold = 0.4) {
   });
 }
 
-export { normalize, similarity, stripArtistPrefix, matchTracksToVideos };
+export { normalize, similarity, stripArtistPrefix, matchTracksToVideos, planMerge };

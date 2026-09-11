@@ -23,10 +23,17 @@ function panelHtml() {
     <div data-testid="zz-body">
       <input data-testid="zz-discogs" placeholder="Discogs release URL" style="width:100%;margin-bottom:4px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:4px;" />
       <input data-testid="zz-playlist" placeholder="YouTube playlist URL" style="width:100%;margin-bottom:4px;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:4px;" />
-      <div style="display:flex;gap:4px;margin-bottom:6px;">
+      <div style="display:flex;gap:4px;margin-bottom:4px;">
         <button data-testid="zz-fetch" style="flex:1;background:#234;color:#fff;border:1px solid #555;border-radius:4px;padding:5px;">Fetch &amp; preview</button>
         <button data-testid="zz-fill" disabled style="flex:1;background:#333;color:#888;border:1px solid #555;border-radius:4px;padding:5px;">Fill form</button>
       </div>
+      <div style="display:flex;gap:4px;margin-bottom:6px;">
+        <button data-testid="zz-sync" disabled style="flex:1;background:#333;color:#888;border:1px solid #555;border-radius:4px;padding:5px;">Sync missing</button>
+        <button data-testid="zz-reread" style="flex:1;background:#333;color:#eee;border:1px solid #555;border-radius:4px;padding:5px;">Re-read form</button>
+      </div>
+      <label style="display:flex;gap:4px;align-items:center;margin-bottom:6px;color:#ccc;">
+        <input data-testid="zz-rename" type="checkbox" /> Rename existing tracks to Discogs titles
+      </label>
       <div data-testid="zz-preview" style="margin-bottom:6px;"></div>
       <div data-testid="zz-log" style="max-height:120px;overflow:auto;background:#000;border:1px solid #333;border-radius:4px;padding:4px;margin-bottom:6px;"></div>
       <button data-testid="zz-dump" style="width:100%;background:#333;color:#eee;border:1px solid #555;border-radius:4px;padding:4px;">Copy debug dump</button>
@@ -69,11 +76,13 @@ function renderPreview() {
       }
     });
   });
-  const fill = document.querySelector('[data-testid="zz-fill"]');
-  if (fill) {
-    fill.disabled = false;
-    fill.style.background = '#263';
-    fill.style.color = '#fff';
+  for (const [testid, color] of [['zz-fill', '#263'], ['zz-sync', '#254']]) {
+    const btn = document.querySelector(`[data-testid="${testid}"]`);
+    if (btn) {
+      btn.disabled = false;
+      btn.style.background = color;
+      btn.style.color = '#fff';
+    }
   }
 }
 
@@ -118,6 +127,8 @@ function mountPanel(handlers) {
   document.body.appendChild(wrap);
   wrap.querySelector('[data-testid="zz-fetch"]').addEventListener('click', handlers.onFetch);
   wrap.querySelector('[data-testid="zz-fill"]').addEventListener('click', handlers.onFill);
+  wrap.querySelector('[data-testid="zz-sync"]').addEventListener('click', handlers.onSync);
+  wrap.querySelector('[data-testid="zz-reread"]').addEventListener('click', handlers.onReread);
   wrap.querySelector('[data-testid="zz-dump"]').addEventListener('click', copyDebugDump);
   const body = wrap.querySelector('[data-testid="zz-body"]');
   const btn = wrap.querySelector('[data-testid="zz-collapse"]');
