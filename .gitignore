@@ -7,3 +7,6 @@ out/
 *storageState*
 add-release.html
 form-structure.json
+
+# local browser automation artefacts
+.playwright-cli/

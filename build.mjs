@@ -18,3 +18,9 @@ for (const f of ORDER) {
 fs.mkdirSync(path.join(root, 'dist'), { recursive: true });
 fs.writeFileSync(path.join(root, 'dist', 'zigzag-fill.user.js'), parts.join('\n') + '\n');
 console.log('built dist/zigzag-fill.user.js');
+
+// The sea-depth overlay is a separate userscript with its own header and asset.
+const seaHeader = fs.readFileSync(path.join(root, 'src', 'sea-header.txt'), 'utf8').trimEnd();
+const seaCode = fs.readFileSync(path.join(root, 'src', 'sea.js'), 'utf8').trim();
+fs.writeFileSync(path.join(root, 'dist', 'zigzag-sea.user.js'), seaHeader + '\n\n' + seaCode + '\n');
+console.log('built dist/zigzag-sea.user.js');
