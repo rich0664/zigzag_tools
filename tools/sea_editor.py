@@ -207,11 +207,27 @@ def box2(a):
     return sc.box_blur(a, 1, 1)
 
 
+def sorted_curve(pts):
+    """points sorted by x with duplicate x collapsed; None if unusable"""
+    p = sorted((float(a), float(b)) for a, b in pts)
+    xs, ys = [], []
+    for x, y in p:
+        if xs and abs(x - xs[-1]) < 1e-4:
+            ys[-1] = y
+        else:
+            xs.append(x)
+            ys.append(y)
+    if len(xs) < 2:
+        return None
+    return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+
+
 def apply_curve(delta, pts):
-    xs = [float(p[0]) for p in pts]
-    ys = [float(p[1]) for p in pts]
-    a = np.abs(delta)
-    return np.sign(delta) * np.interp(a, xs, ys).astype(np.float32)
+    c = sorted_curve(pts)
+    if c is None:
+        return delta
+    xs, ys = c
+    return np.sign(delta) * np.interp(np.abs(delta), xs, ys).astype(np.float32)
 
 
 def mask_field(mask, ctx, fallback=None):
@@ -536,9 +552,9 @@ def evaluate(progress=None, stop_at=None, region=None):
                     if contrib is not None and ctx.get("h") is not None:
                         val = np.clip(ctx["h"] + apply_curve(contrib, pts), 0, 1)
                     else:
-                        xs = [float(p[0]) for p in pts]
-                        ys = [float(p[1]) for p in pts]
-                        val = np.interp(val, xs, ys).astype(np.float32)
+                        c = sorted_curve(pts)
+                        if c is not None:
+                            val = np.interp(val, c[0], c[1]).astype(np.float32)
             _cache[nid] = (chain_sig, val)
 
         if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
@@ -980,7 +996,8 @@ function curveUI(pts, cb){
     if(bd<0.02&&pts.length>2){pts.splice(best,1);draw();cb(pts);}};
   addEventListener('mousemove',e=>{ if(curveDrag<0)return; const [x,y]=pos(e);
     pts[curveDrag]=[Math.max(0,Math.min(1,x)),Math.max(0,Math.min(1,y))]; draw(); });
-  addEventListener('mouseup',()=>{ if(curveDrag>=0){curveDrag=-1;cb(pts);} });
+  addEventListener('mouseup',()=>{ if(curveDrag>=0){curveDrag=-1;
+    pts.sort((a,b)=>a[0]-b[0]); draw(); cb(pts);} });
   draw(); return c;
 }
 async function set(kind,id,k,v){
