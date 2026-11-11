@@ -73,9 +73,10 @@ CFG = dict(
 
     # ---- colour ---------------------------------------------------------
     land_t=0.58,             # tone under the land (covered by tiles in game)
-    land_band=2,             # tiles of coast tone pushed INTO the land fill, so
+    land_band=1,             # tiles of coast tone pushed INTO the land fill, so
                              # the tiles' seam never shows a dark ring
     land_band_t=None,        # None = use shore_base
+    rim_levels=4,            # coast pass width in pixels (dilated from the mask)
     rim_min=2.0,             # coast pass range, tiles
     rim_max=5.0,
     rim_noise_scale=1200,
@@ -311,10 +312,16 @@ def render(land, d, cfg=CFG):
     rgb = np.stack([np.interp(t, PALETTE_STOPS, PALETTE_COLS[:, i]) for i in range(3)], axis=-1)
     rgb = rgb * shade
 
-    # separate coast pass: pure distance, 2-5 tile range, additive
-    r_rim = cfg["rim_min"] + (cfg["rim_max"] - cfg["rim_min"]) * smoothstep(
-        (fbm(W, H, cfg["rim_noise_scale"], 3, seed=71) - 0.30) * 1.8)
-    rim = np.clip(1.0 - (d - 1.0) / r_rim, 0.0, 1.0) * (~land)
+    # separate coast pass: measured in PIXELS from the land mask, not from the
+    # distance field, so it always starts on the first water pixel
+    levels = max(1, int(cfg["rim_levels"]))
+    band = np.zeros((H, W), dtype=np.float32)
+    cur = land.copy()
+    for k in range(1, levels + 1):
+        nxt = dilate1(cur)
+        band = np.where(nxt & ~cur, np.float32(k), band)
+        cur = nxt
+    rim = np.clip(1.0 - (band - 1.0) / max(1.0, levels - 1.0), 0.0, 1.0)
     rgb = rgb + np.array(cfg["rim_rgb"]) * (cfg["rim_strength"] * rim[:, :, None])
 
     return np.clip(rgb, 0, 255).astype(np.uint8)
