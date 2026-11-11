@@ -15,6 +15,7 @@ import hashlib
 import io
 import json
 import os
+import time
 import threading
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -30,10 +31,15 @@ MAP_PNG = os.path.join(WORK, "map.png")
 PRESETS = os.path.join(WORK, "presets")
 PORT = 3007
 
-_lock = threading.Lock()
-_full = None          # whole-map land mask
-_cache = {}           # node id -> (signature, value)
+_lock = threading.Lock()          # guards STATE mutation + preview bytes
+_render_lock = threading.Lock()   # one render at a time
+_full = None                      # whole-map land mask
+_cache = {}                       # node id -> (signature, value)
 _version = 0
+_png = None
+_render = {"running": False, "stage": 0, "total": 0, "node": "",
+           "started": 0.0, "elapsed": 0.0, "stamp": 0, "last_ms": 0.0,
+           "error": None, "auto": False}
 
 
 # --------------------------------------------------------------------------
@@ -248,7 +254,7 @@ ORDER = [
 ]
 
 
-def evaluate():
+def evaluate(progress=None):
     """run the chain, reusing cache entries whose signature still matches"""
     global _cache
     region = STATE["region"]
@@ -257,7 +263,10 @@ def evaluate():
     chain_sig = "0"
     new_cache = {}
 
-    for nid, fn in ORDER:
+    total = len(ORDER)
+    for i, (nid, fn) in enumerate(ORDER):
+        if progress:
+            progress(i, total, nid)
         node = STATE["nodes"][nid]
         chain_sig = sig(chain_sig, nid, node, [STATE["masks"][m] for m in node.get("masks", [])],
                         region.get("x0"), region.get("y0"), region.get("w"),
@@ -311,13 +320,58 @@ def channel_image(ctx, channel):
     return np.stack([v * 255] * 3, -1).astype(np.uint8)
 
 
-def preview_png():
-    with _lock:
-        ctx = evaluate()
-        rgb = channel_image(ctx, STATE.get("channel", "output"))
-    buf = io.BytesIO()
-    Image.fromarray(rgb, "RGB").save(buf, "PNG")
-    return buf.getvalue()
+def _progress(stage, total, node):
+    _render.update(stage=stage, total=total, node=node,
+                   elapsed=round(time.time() - _render["started"], 2))
+
+
+def render_now(auto=False):
+    """render once into the in-memory PNG (serialised by _render_lock)"""
+    global _png
+    if _render["running"]:
+        return False
+    with _render_lock:
+        _render.update(running=True, stage=0, total=len(ORDER), node="start",
+                       started=time.time(), elapsed=0.0, error=None)
+        t0 = time.time()
+        try:
+            ctx = evaluate(_progress)
+            rgb = channel_image(ctx, STATE.get("channel", "output"))
+            buf = io.BytesIO()
+            Image.fromarray(rgb, "RGB").save(buf, "PNG")
+            with _lock:
+                _png = buf.getvalue()
+                _render["stamp"] += 1
+        except Exception as exp:
+            _render["error"] = str(exp)
+        finally:
+            _render.update(running=False, last_ms=int((time.time() - t0) * 1000),
+                           elapsed=round(time.time() - t0, 2), node="done")
+    return True
+
+
+def render_async():
+    t = threading.Thread(target=render_now, daemon=True)
+    t.start()
+    return True
+
+
+_auto_timer = None
+
+
+def schedule_render(delay=0.35):
+    """auto mode: debounce, and re-queue if a render is already running"""
+    global _auto_timer
+    if _auto_timer is not None:
+        _auto_timer.cancel()
+
+    def fire():
+        if not render_now():
+            schedule_render(0.3)
+
+    _auto_timer = threading.Timer(delay, fire)
+    _auto_timer.daemon = True
+    _auto_timer.start()
 
 
 # --------------------------------------------------------------------------
@@ -342,6 +396,9 @@ input[type=range]{width:100%} input[type=number],input[type=text],select{width:1
 background:#0b1117;color:var(--t);border:1px solid #2a3a4b;padding:2px 4px}
 button{background:#24405a;color:var(--t);border:0;padding:4px 8px;cursor:pointer;border-radius:3px}
 h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter-spacing:.08em}
+#barwrap{height:18px;background:#0a1016;position:relative;flex:0 0 auto}
+#bar{height:100%;width:0;background:#2f6a8c;transition:width .12s linear}
+#prog{position:absolute;left:8px;top:0;line-height:18px;font-size:11px;color:#cfe0ee}
 </style>
 <div id=left><h3>pipeline</h3><div id=nodes></div><h3>masks</h3><div id=masks></div></div>
 <div id=mid>
@@ -350,8 +407,11 @@ h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter
     w<input id=rw type=number size=5> h<input id=rh type=number size=5>
     <select id=scale><option value=1>1 px/tile<option value=0.5>0.5 px/tile</select>
     <select id=chan></select>
+    <button id=go>render</button>
+    <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
     <button id=save>save preset</button><button id=load>load preset</button>
   </div>
+  <div id=barwrap><div id=bar></div><span id=prog></span></div>
   <div id=prev><img id=img></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div><h3>masks wired</h3><div id=wired></div></div>
@@ -360,10 +420,25 @@ let S=null, sel=null;
 async function api(path, body){const r=await fetch(path,{method:body?'POST':'GET',
   headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
   return r.headers.get('content-type')?.includes('json')?r.json():r.text();}
-function refresh(){document.getElementById('img').src='/api/preview?v='+Date.now();}
+let lastStamp=-1;
+function refresh(){poll();}
+async function poll(){
+  const s=await api('/api/status');
+  const pct=s.running&&s.total?Math.round(100*s.stage/s.total):100;
+  bar.style.width=pct+'%';
+  prog.textContent=s.running?`${s.node} ${s.stage}/${s.total} ~${s.elapsed}s`
+     :(s.error?('error: '+s.error):(s.last_ms?`${s.last_ms} ms`:'idle'));
+  if(s.stamp!==lastStamp){lastStamp=s.stamp;img.src='/api/preview?t='+s.stamp;}
+  if(s.running)setTimeout(poll,300);
+}
+function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
+document.getElementById('go').onclick=render;
+document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
 async function init(){
   S=await api('/api/state');
-  renderNodes(); renderMasks(); renderTop(); select(S.last||'erode'); refresh();
+  document.getElementById('auto').checked=!!S.auto;
+  renderNodes(); renderMasks(); renderTop(); select(S.last||'erode');
+  render();
 }
 function renderNodes(){
   const el=document.getElementById('nodes'); el.innerHTML='';
@@ -421,15 +496,19 @@ function renderParams(){
   }
 }
 async function setParam(id,k,v){
-  await api('/api/set',{id,k,v}); S=await api('/api/state'); refresh();
+  await api('/api/set',{id,k,v}); S=await api('/api/state');
   if(id===sel) renderParams(); renderNodes();
+  if(S.auto) setTimeout(poll,120); else refresh();
 }
 for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=e=>{
   const r={x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value};
-  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;refresh();});};
+  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
+    if(S.auto)render();else refresh();});};
 scale.onchange=()=>{const r={...S.region,scale:+scale.value};
-  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;refresh();});};
-chan.onchange=()=>{api('/api/set',{id:'channel',k:'all',v:chan.value}).then(refresh);};
+  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
+    if(S.auto)render();else refresh();});};
+chan.onchange=()=>{api('/api/set',{id:'channel',k:'all',v:chan.value}).then(()=>{
+  if(S.auto)render();else refresh();});};
 save.onclick=()=>{const n=prompt('preset name','preset'); if(n) api('/api/preset/save',{name:n}).then(refresh);};
 load.onclick=async()=>{const n=prompt('preset name','preset'); if(n){await api('/api/preset/load',{name:n});
   S=await api('/api/state'); renderNodes(); renderMasks(); renderTop(); refresh();}};
@@ -439,7 +518,8 @@ addEventListener('mousemove',e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.
   rx.value=drag.x0-Math.round(dx/S.region.scale); ry.value=drag.y0-Math.round(dy/S.region.scale);});
 addEventListener('mouseup',()=>{if(!drag)return;drag=null;prev.style.cursor='grab';
   const r={x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value};
-  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;refresh();});});
+  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
+    if(S.auto)render();else refresh();});});
 init();
 </script>"""
 
@@ -473,20 +553,23 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
         elif self.path.startswith("/api/preview"):
-            try:
-                self._png(preview_png())
-            except Exception as exp:  # surface errors in the UI instead of dying
-                self.send_response(500)
-                self.send_header("content-type", "text/plain")
+            if _png is None:
+                self.send_response(204)
                 self.end_headers()
-                self.wfile.write(str(exp).encode())
+            else:
+                self._png(_png)
+        elif self.path == "/api/status":
+            with _lock:
+                data = dict(_render)
+                data["has_image"] = _png is not None
+            self._json(data)
         elif self.path == "/api/state":
             with _lock:
                 st = {"region": STATE["region"], "channel": STATE["channel"],
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
                       "order": [n for n, _ in ORDER],
                       "channels": ["output", "h", "d", "color", "shade"],
-                      "last": STATE.get("last", "erode")}
+                      "last": STATE.get("last", "erode"), "auto": _render["auto"]}
             self._json(st)
         else:
             self.send_response(404)
@@ -496,7 +579,9 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length", 0))
         body = json.loads(self.rfile.read(n) or b"{}")
         with _lock:
-            if self.path == "/api/set":
+            if self.path == "/api/auto":
+                _render["auto"] = bool(body.get("on"))
+            elif self.path == "/api/set":
                 nid, key, val = body["id"], body["k"], body["v"]
                 if nid == "region":
                     STATE["region"] = val
@@ -512,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["masks"][nid].update(val)
                     else:
                         STATE["masks"][nid][key] = val
+            elif self.path == "/api/render":
+                pass          # started outside the lock, below
             elif self.path == "/api/select":
                 STATE["last"] = body.get("id")
             elif self.path == "/api/preset/save":
@@ -529,6 +616,11 @@ class Handler(BaseHTTPRequestHandler):
                     for nid, params in data[k].items():
                         STATE[k].setdefault(nid, {}).update(params)
                 _cache.clear()
+        # outside the state lock: never hold it while rendering
+        if self.path == "/api/render":
+            render_async()
+        elif self.path == "/api/set" and _render["auto"]:
+            schedule_render()
         self._json({"ok": True})
 
 
