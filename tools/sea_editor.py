@@ -134,7 +134,8 @@ DESC = {
     "warp.scale": "feature size of the warp, in tiles (larger = broader bends)",
     "height.mode": "ramp = one exponential falloff; profile = shelf, shelf break, slope, abyss",
     "height.deep_dist": "distance in tiles at which the floor reaches its lowest point",
-    "height.curve": "exponent on the ramp: >1 keeps shallow water wide, <1 drops off sooner",
+    "height.curve": "exponent on the falloff, both modes: >1 deepens sooner (narrow "
+                     "shallows), <1 keeps shallow water wide and drops off later",
     "height.shelf_t": "profile mode: fraction of deep_dist that is flat shelf",
     "height.slope_t": "profile mode: fraction of deep_dist where the shelf break happens",
     "height.abyss_t": "profile mode: unused end marker for the abyssal plain",
@@ -309,17 +310,18 @@ def n_warp(node, ctx, prev_sig):
 
 def n_height(node, ctx, prev_sig):
     d = ctx["d"]
+    g = max(1e-3, float(node["curve"]))
+    dmax = float(node["deep_dist"])
     if node.get("mode", "profile") == "ramp":
-        h = np.clip(1.0 - d / float(node["deep_dist"]), 0, 1) ** float(node["curve"])
+        h = np.clip(1.0 - d / dmax, 0, 1) ** g
     else:
         # piecewise margin profile: flat shelf, a fast shelf break, a slope,
         # then the abyssal plain
-        dmax = float(node["deep_dist"])
         xs = np.array([0.0, float(node["shelf_t"]) * dmax,
                        float(node["slope_t"]) * dmax, dmax], dtype=np.float32)
         ys = np.array([1.0, 0.93, 0.45, 0.0], dtype=np.float32)
-        h = np.interp(np.clip(d, 0, dmax), xs, ys).astype(np.float32)
-    return h, None
+        h = np.interp(np.clip(d, 0, dmax), xs, ys) ** g
+    return h.astype(np.float32), None
 
 
 def n_noise(node, ctx, prev_sig):
