@@ -14,7 +14,7 @@
   'use strict';
 
   const SEA_URL = window.__ZZ_SEA_URL ||
-    'https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist/zigzag-sea.webp?v=0.2.5';
+    'https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist/zigzag-sea.webp?v=0.2.6';
   const MAP_W = 7749;          // main map extent, in tiles
   const MAP_H = 5254;
   const OV_ID = 'zz-sea';
