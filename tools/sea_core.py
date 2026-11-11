@@ -130,7 +130,7 @@ def upscale(values, shape):
     return np.array(Image.fromarray(values.astype(np.float32), mode="F").resize(shape, Image.BICUBIC))
 
 
-def edt_small(mask, down=CFG["edt_down"]):
+def edt_small(mask, down=CFG["edt_down"], cancel=None):
     """exact separable Euclidean distance transform, in tiles, at 1/down"""
     h, w = mask.shape
     sw, sh = max(1, w // down), max(1, h // down)
@@ -147,13 +147,15 @@ def edt_small(mask, down=CFG["edt_down"]):
     yy = np.arange(sh, dtype=np.float32)[:, None]
     d = np.full((sh, sw), np.inf, dtype=np.float32)
     for y0 in range(sh):
+        if cancel is not None and (y0 & 127) == 0:
+            cancel()
         np.minimum(d[y0], (d1 + (yy - y0) ** 2).min(axis=0), out=d[y0])
     return np.sqrt(d) * down
 
 
-def edt(mask, down=CFG["edt_down"]):
+def edt(mask, down=CFG["edt_down"], cancel=None):
     h, w = mask.shape
-    return upscale(edt_small(mask, down), (w, h))
+    return upscale(edt_small(mask, down, cancel=cancel), (w, h))
 
 
 def dilate1(mask):
@@ -170,13 +172,15 @@ def window_dist(mask, w):
     return out
 
 
-def slab_erode(h, window=3, layers=24):
+def slab_erode(h, window=3, layers=24, cancel=None):
     """Hatchling's slab erosion (proceduralpixels "fastest erosion algorithm"):
     per threshold, distance to the nearest in/out-of-threshold texel inside a
     small window, remapped to a linear step, accumulated over layers."""
     lo, hi = float(h.min()), float(h.max())
     acc = np.zeros(h.shape, dtype=np.float32)
     for i in range(layers):
+        if cancel is not None:
+            cancel()
         t = lo + (hi - lo) * (i + 0.5) / layers
         above = h > t
         dp = window_dist(above, window)

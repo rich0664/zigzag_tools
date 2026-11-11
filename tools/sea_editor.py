@@ -33,14 +33,13 @@ PRESETS = os.path.join(WORK, "presets")
 PORT = 3007   # override with --port
 
 _lock = threading.Lock()          # guards STATE mutation + preview bytes
-_render_lock = threading.Lock()   # one render at a time
 _full = None                      # whole-map land mask
 _cache = {}                       # node id -> (signature, value)
 _version = 0
 _png = None
 _render = {"running": False, "stage": 0, "total": 0, "node": "",
            "started": 0.0, "elapsed": 0.0, "stamp": 0, "last_ms": 0.0,
-           "error": None, "auto": False, "pending": False}
+           "error": None, "auto": False, "times": {}}
 
 
 # --------------------------------------------------------------------------
@@ -197,7 +196,50 @@ def load_map():
     return _full
 
 
-def load_region(region):
+# a render holds a dozen float32 planes the size of the region; cap the region so
+# it cannot balloon the process, and refuse to start when the box is short on RAM
+MAX_REGION_PX = 4_000_000        # ~2400x1600 at 1 px/tile
+MIN_FREE_MB = 800
+
+
+def region_pixels(r):
+    try:
+        return int(r["w"]) * int(r["h"]) * float(r.get("scale", 1.0)) ** 2
+    except Exception:
+        return 0
+
+
+def region_limit_msg(r):
+    px = region_pixels(r)
+    if px > MAX_REGION_PX:
+        return (f"region is {px / 1e6:.1f} MPx; a render is capped at "
+                f"{MAX_REGION_PX / 1e6:.0f} MPx, lower w/h or scale")
+    return None
+
+
+def mem_available_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1024.0
+    except Exception:
+        pass
+    return None
+
+
+def render_guard(r):
+    msg = region_limit_msg(r)
+    if msg:
+        return msg
+    free = mem_available_mb()
+    if free is not None and free < MIN_FREE_MB:
+        return (f"only {free:.0f} MB RAM free, not rendering "
+                f"(needs {MIN_FREE_MB} MB headroom)")
+    return None
+
+
+def load_region(region, cancel=None):
     full = load_map()
     s = float(region.get("scale", 1.0))
     x0, y0 = int(region["x0"]), int(region["y0"])
@@ -210,7 +252,7 @@ def load_region(region):
     xe = min(W, x0 + w + margin)
     ye = min(H, y0 + h + margin)
     sub = full[ys:ye, xs:xe]
-    d_sub = sc.edt(sub, down=int(STATE["nodes"]["distance"]["down"]))
+    d_sub = sc.edt(sub, down=int(STATE["nodes"]["distance"]["down"]), cancel=cancel)
     d = d_sub[(y0 - ys):(y0 - ys) + min(h, H - y0), (x0 - xs):(x0 - xs) + min(w, W - x0)]
     land = sub[(y0 - ys):(y0 - ys) + d.shape[0], (x0 - xs):(x0 - xs) + d.shape[1]]
     return land, d
@@ -343,6 +385,12 @@ def n_features(node, ctx, prev_sig):
     return np.clip(h + c, 0, 1), c
 
 
+def _canceller(ctx):
+    """a callback the heavy loops call so a superseded render stops quickly"""
+    gen = ctx.get("gen", 0)
+    return (lambda: check_cancel(gen)) if gen else None
+
+
 def n_erode(node, ctx, prev_sig):
     h = ctx["h"]
     p = 1.0 / 2.0
@@ -350,7 +398,7 @@ def n_erode(node, ctx, prev_sig):
     SW, SH = max(8, int(W * p)), max(8, int(H * p))
     hs = np.array(Image.fromarray(h, mode="F").resize((SW, SH), Image.BICUBIC))
     he = sc.slab_erode(hs, window=max(2, int(round(float(node["window"]) * p))),
-                       layers=int(node["layers"]))
+                       layers=int(node["layers"]), cancel=_canceller(ctx))
     he = sc.upscale(he, (W, H))
     mix = float(node["mix"]) * mask_weight(node, ctx)
     out = np.clip(h * (1 - mix) + he * mix, 0, 1)
@@ -472,6 +520,7 @@ def n_drainage(node, ctx, prev_sig):
     dh = np.zeros((SH, SW), dtype=np.float32)
 
     for _ in range(max(1, int(node["steps"]))):
+        check_cancel(ctx.get("gen", 0))
         rec, slope = flow_dirs(cur)
         order = np.argsort(-cur.ravel(), kind="stable")
         acc = flow_accum(rec, order)
@@ -541,21 +590,24 @@ NODE_IO = {
 
 
 
-def evaluate(progress=None, stop_at=None, region=None):
+def evaluate(progress=None, stop_at=None, region=None, gen=0):
     global _cache
     region = region or STATE["region"]
-    land, d = load_region(region)
-    ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {}}
+    land, d = load_region(region, cancel=(lambda: check_cancel(gen)) if gen else None)
+    ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {}, "gen": gen}
     steps = [("distance", None), ("height", None)]
     steps += [(f["id"], f) for f in STATE["filters"]]
     steps += [("palette", None), ("coast", None), ("output", None)]
 
     total = len(steps)
     prev_sig = "0"
+    times = {}
     for i, (nid, filt) in enumerate(steps):
+        check_cancel(gen)
         if progress:
             progress(i, total, nid)
         node = filt if filt is not None else STATE["nodes"][nid]
+        t_node = time.perf_counter()
 
         chain_sig = sig(prev_sig, nid, node,
                         [STATE["masks"][m] for m in node.get("masks", [])],
@@ -592,6 +644,7 @@ def evaluate(progress=None, stop_at=None, region=None):
                     if c is not None:
                         val = np.interp(val, c[0], c[1]).astype(np.float32)
             _cache[nid] = (chain_sig, val)
+        times[nid] = round((time.perf_counter() - t_node) * 1000.0, 1)
 
         if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
             ctx["fields"][nid] = val
@@ -611,6 +664,7 @@ def evaluate(progress=None, stop_at=None, region=None):
         if stop_at and nid == stop_at:
             break
 
+    ctx["times"] = times
     return ctx
 
 
@@ -640,75 +694,89 @@ def channel_image(ctx, channel):
     return np.stack([v * 255] * 3, -1).astype(np.uint8)
 
 
-def _progress(stage, total, node):
-    _render.update(stage=stage, total=total, node=node,
-                   elapsed=round(time.time() - _render["started"], 2))
+# --- render generations: a new request supersedes the one in flight --------
+_gen = 0
+_gen_lock = threading.Lock()
 
 
-def render_now(auto=False):
-    """render once into the in-memory PNG (serialised by _render_lock)"""
+class _Cancelled(Exception):
+    pass
+
+
+def is_current(gen):
+    with _gen_lock:
+        return gen == _gen
+
+
+def check_cancel(gen):
+    """raise inside a render that a newer request has replaced"""
+    if gen and not is_current(gen):
+        raise _Cancelled()
+
+
+def _progress(gen, stage, total, node):
+    if is_current(gen):
+        _render.update(stage=stage, total=total, node=node,
+                       elapsed=round(time.time() - _render["started"], 2))
+
+
+def render_now(gen=None):
+    """render the current state into the in-memory PNG"""
     global _png
-    with _render_lock:
-        _render.update(running=True, stage=0, total=2 + len(STATE["filters"]) + 3, node="start",
-                       started=time.time(), elapsed=0.0, error=None)
-        t0 = time.time()
-        try:
-            ch = STATE.get("channel", "output")
-            stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
-            region = dict(STATE["region"])
-            fast = bool(STATE.get("fast"))
-            if fast:
-                region["scale"] = float(region.get("scale", 1.0)) * 0.5
-            ctx = evaluate(_progress, stop_at=stop or None, region=region)
-            rgb = channel_image(ctx, ch)
-            if fast:      # keep the display size stable
-                out_w, out_h = int(STATE["region"]["w"]), int(STATE["region"]["h"])
-                rgb = np.array(Image.fromarray(rgb, "RGB").resize((out_w, out_h), Image.NEAREST))
-            # the real map is a separate overlay layer in the browser, so it can
-            # follow a drag without waiting for the sea render
-            buf = io.BytesIO()
-            Image.fromarray(rgb, "RGB").save(buf, "PNG")
-            with _lock:
-                _png = buf.getvalue()
-                _render["stamp"] += 1
-        except Exception as exp:
+    if gen is None:
+        with _gen_lock:
+            gen = _gen
+    t0 = time.time()
+    try:
+        blocked = render_guard(STATE["region"])
+        if blocked:
+            if is_current(gen):
+                _render["error"] = blocked
+            print("render blocked:", blocked, flush=True)
+            return False
+        ch = STATE.get("channel", "output")
+        stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
+        region = dict(STATE["region"])
+        fast = bool(STATE.get("fast"))
+        if fast:
+            region["scale"] = float(region.get("scale", 1.0)) * 0.5
+        ctx = evaluate(lambda i, t, n: _progress(gen, i, t, n),
+                       stop_at=stop or None, region=region, gen=gen)
+        rgb = channel_image(ctx, ch)
+        if fast:      # keep the display size stable
+            out_w, out_h = int(STATE["region"]["w"]), int(STATE["region"]["h"])
+            rgb = np.array(Image.fromarray(rgb, "RGB").resize((out_w, out_h), Image.NEAREST))
+        # the real map is a separate overlay layer in the browser, so it can
+        # follow a drag without waiting for the sea render
+        buf = io.BytesIO()
+        Image.fromarray(rgb, "RGB").save(buf, "PNG")
+        with _lock:
+            check_cancel(gen)      # a newer request landed while encoding
+            _png = buf.getvalue()
+            _render["stamp"] += 1
+        _render["times"] = ctx.get("times", {})
+    except _Cancelled:
+        return False
+    except Exception as exp:
+        if is_current(gen):
             _render["error"] = str(exp)
-        finally:
+    finally:
+        if is_current(gen):
             _render.update(running=False, last_ms=int((time.time() - t0) * 1000),
                            elapsed=round(time.time() - t0, 2), node="done")
     return True
 
 
-_queue_lock = threading.Lock()
-_render_thread = None
-
-
 def render_async():
-    """queue a render; asking while one is running renders once more after it"""
-    global _render_thread
-    with _queue_lock:
-        _render["pending"] = True
-        if _render["running"] or (_render_thread is not None
-                                  and _render_thread.is_alive()):
-            return True
-        # report "running" before the worker starts, so a poll fired right after
-        # the request does not conclude that the render is already finished
-        _render.update(running=True, node="queued", stage=0, total=0,
-                       started=time.time(), elapsed=0.0)
-        _render_thread = threading.Thread(target=_render_loop, daemon=True)
-        _render_thread.start()
+    """drop whatever is rendering and start on the current state"""
+    global _gen
+    with _gen_lock:
+        _gen += 1
+        gen = _gen
+    _render.update(running=True, node="queued", stage=0, total=0, error=None,
+                   started=time.time(), elapsed=0.0)
+    threading.Thread(target=render_now, args=(gen,), daemon=True).start()
     return True
-
-
-def _render_loop():
-    global _render_thread
-    while True:
-        with _queue_lock:
-            if not _render.get("pending"):
-                _render_thread = None
-                return
-            _render["pending"] = False
-        render_now()
 
 
 _auto_timer = None
@@ -747,6 +815,7 @@ max-width:100%;max-height:100%;pointer-events:none;user-select:none;-webkit-user
 .node.sel{background:#24405a}.node input{cursor:pointer}
 .x{margin-left:auto;color:#8fa6ba;padding:0 4px}.x:hover{color:#e08a8a}
 .io{color:#6b8093;font-size:10px;margin-left:auto;white-space:nowrap}
+.t{color:#7d93a6;font-size:10px;font-variant-numeric:tabular-nums;opacity:.85}
 .tap{color:#7fa9c4;font-size:10px}
 label{display:block;margin:5px 0 2px;color:#8fa6ba}
 input[type=number],input[type=text],select{width:100%;background:#0b1117;color:var(--t);
@@ -800,6 +869,7 @@ async function poll(){
       ?`${s.node} ${s.stage}/${s.total} ${Number(s.elapsed).toFixed(1)}s`
       :(s.error?('error: '+s.error)
         :(imgBusy?'loading image…':(s.last_ms?`${s.last_ms} ms`:'idle')));
+    paintTimes(s.times||{});
     if(s.stamp!==lastStamp){
       lastStamp=s.stamp;
       const im=document.getElementById('img');
@@ -830,8 +900,7 @@ async function boot(){
   S=await api('/api/state'); window.DESC=S.desc||{};
   document.getElementById('auto').checked=!!S.auto;
   syncMap();
-  rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
-  scale.value=String(S.region.scale);
+  applyRegion(S.region);
   renderTop(); renderNodes(); renderMasks();
   const ft=document.getElementById('ftype');
   if(ft) ft.innerHTML=Object.keys(S.filter_defs||{}).map(t=>`<option>${t}</option>`).join('');
@@ -842,6 +911,16 @@ async function boot(){
 }
 function renderTop(){
   chan.innerHTML=S.channels.map(c=>`<option ${c===S.channel?'selected':''}>${c}</option>`).join('');
+}
+let NODE_TIMES={};
+function paintTimes(t){
+  if(t) NODE_TIMES=t;
+  for(const el of document.querySelectorAll('.node')){
+    const sp=el.querySelector('.t'); if(!sp) continue;
+    const ms=NODE_TIMES[el.dataset.node];
+    sp.textContent = ms===undefined ? ''
+      : (ms>=1000 ? (ms/1000).toFixed(2)+'s' : (ms>=10?Math.round(ms):ms.toFixed(1))+'ms');
+  }
 }
 function ioLabel(d,id,inp,out,title){
   const sp=document.createElement('span'); sp.className='io'; sp.textContent=inp+' → '+out;
@@ -855,6 +934,8 @@ function renderNodes(){
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=n.enabled;
     cb.onclick=e=>{e.stopPropagation(); set('nodes',id,'enabled',cb.checked);};
     d.appendChild(cb); d.appendChild(document.createTextNode(id));
+    d.dataset.node=id;
+    const tm=document.createElement('span'); tm.className='t'; d.appendChild(tm);
     const io=S.io&&S.io[id]; if(io) ioLabel(d,id,io[0],io[1],id+' takes '+io[0]+' and outputs '+io[1]);
     d.onclick=()=>select(id); el.appendChild(d);
   }
@@ -864,7 +945,9 @@ function renderNodes(){
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=f.enabled;
     cb.onclick=e=>{e.stopPropagation(); set('filters',f.id,'enabled',cb.checked);};
     d.appendChild(cb); d.appendChild(document.createTextNode(f.type));
-    ioLabel(d,f.id,'height','height','filter #'+f.id+' ('+f.type+')');
+    d.dataset.node=f.id;
+    const tm=document.createElement('span'); tm.className='t'; d.appendChild(tm);
+    d.title='filter #'+f.id+' ('+f.type+'): height in, height out';
     const up=document.createElement('span'); up.className='x'; up.textContent='↑';
     up.onclick=e=>{e.stopPropagation(); api('/api/filter/move',{id:f.id,dir:'up'}).then(reload);};
     const dn=document.createElement('span'); dn.className='x'; dn.textContent='↓';
@@ -874,6 +957,7 @@ function renderNodes(){
     d.append(up,dn,x);
     d.onclick=()=>select(f.id); fe.appendChild(d);
   });
+  paintTimes();
 }
 function renderMasks(){
   const el=document.getElementById('masks'); el.innerHTML='';
@@ -1145,12 +1229,15 @@ document.getElementById('del').onclick=async()=>{const n=presets.value;
   if(!n || !confirm('delete save "'+n+'"?')) return;
   await api('/api/preset/del',{name:n}); await loadPresets();};
 const region=()=>({x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value});
-for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=()=>{
-  const r=region(); api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
-    if(S.auto)render();else poll();});};
-document.getElementById('scale').onchange=()=>{const r=region();
-  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
-    if(S.auto)render();else poll();});};
+function applyRegion(r){rx.value=r.x0;ry.value=r.y0;rw.value=r.w;rh.value=r.h;
+  scale.value=String(r.scale);}
+function commitRegion(){
+  // the server may refuse a region; re-read what it actually kept
+  api('/api/set',{id:'region',k:'all',v:region()}).then(async()=>{
+    S=await api('/api/state'); applyRegion(S.region); render();});
+}
+for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=commitRegion;
+document.getElementById('scale').onchange=commitRegion;
 document.getElementById('chan').onchange=()=>{const v=chan.value;
   api('/api/set',{id:'channel',k:'all',v}).then(()=>{S.channel=v;render();});};
 const prev=document.getElementById('prev');
@@ -1297,7 +1384,11 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/set":
                 nid, key, val = body["id"], body["k"], body["v"]
                 if nid == "region":
-                    STATE["region"] = val
+                    msg = region_limit_msg(val)
+                    if msg:
+                        _render["error"] = msg
+                    else:
+                        STATE["region"] = val
                 elif nid == "channel":
                     STATE["channel"] = val
                 elif nid == "overlay":
@@ -1383,7 +1474,15 @@ def main():
                     help="port to serve on (default 3007); use a second port to "
                          "keep an agent's experiments off your own session")
     ap.add_argument("--no-browser", action="store_true")
+    ap.add_argument("--mem-mb", type=int, default=3072,
+                    help="address-space cap for the editor process (MB)")
     args = ap.parse_args()
+    try:
+        import resource
+        cap = args.mem_mb * 1024 * 1024
+        resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
+    except Exception as exp:
+        print("could not set memory cap:", exp, flush=True)
     PORT = args.port
     if PORT != 3007:
         # a second port must not overwrite the state of the session you drive
