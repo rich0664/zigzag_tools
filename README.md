@@ -47,7 +47,8 @@ window.__zzSea.on = true    // on
 ## Texture generator
 
 `tools/build_sea.py` rebuilds `dist/zigzag-sea.webp` (7749 × 5254, one pixel per
-map tile). Needs numpy + Pillow:
+map tile). The pipeline itself lives in `tools/sea_core.py`, shared with the crop
+renderer so the two can never drift. Needs numpy + Pillow:
 
 ```bash
 python3 tools/build_sea.py     # ~3 min, writes dist/zigzag-sea.webp
