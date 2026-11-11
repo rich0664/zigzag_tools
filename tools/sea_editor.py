@@ -40,7 +40,7 @@ _version = 0
 _png = None
 _render = {"running": False, "stage": 0, "total": 0, "node": "",
            "started": 0.0, "elapsed": 0.0, "stamp": 0, "last_ms": 0.0,
-           "error": None, "auto": False}
+           "error": None, "auto": False, "pending": False}
 
 
 # --------------------------------------------------------------------------
@@ -615,8 +615,6 @@ def _progress(stage, total, node):
 def render_now(auto=False):
     """render once into the in-memory PNG (serialised by _render_lock)"""
     global _png
-    if _render["running"]:
-        return False
     with _render_lock:
         _render.update(running=True, stage=0, total=2 + len(STATE["filters"]) + 3, node="start",
                        started=time.time(), elapsed=0.0, error=None)
@@ -648,26 +646,47 @@ def render_now(auto=False):
     return True
 
 
+_queue_lock = threading.Lock()
+_render_thread = None
+
+
 def render_async():
-    t = threading.Thread(target=render_now, daemon=True)
-    t.start()
+    """queue a render; asking while one is running renders once more after it"""
+    global _render_thread
+    with _queue_lock:
+        _render["pending"] = True
+        if _render["running"] or (_render_thread is not None
+                                  and _render_thread.is_alive()):
+            return True
+        # report "running" before the worker starts, so a poll fired right after
+        # the request does not conclude that the render is already finished
+        _render.update(running=True, node="queued", stage=0, total=0,
+                       started=time.time(), elapsed=0.0)
+        _render_thread = threading.Thread(target=_render_loop, daemon=True)
+        _render_thread.start()
     return True
+
+
+def _render_loop():
+    global _render_thread
+    while True:
+        with _queue_lock:
+            if not _render.get("pending"):
+                _render_thread = None
+                return
+            _render["pending"] = False
+        render_now()
 
 
 _auto_timer = None
 
 
 def schedule_render(delay=0.35):
-    """auto mode: debounce, and re-queue if a render is already running"""
+    """auto mode: debounce a burst of edits into one queued render"""
     global _auto_timer
     if _auto_timer is not None:
         _auto_timer.cancel()
-
-    def fire():
-        if not render_now():
-            schedule_render(0.3)
-
-    _auto_timer = threading.Timer(delay, fire)
+    _auto_timer = threading.Timer(delay, render_async)
     _auto_timer.daemon = True
     _auto_timer.start()
 
@@ -733,23 +752,35 @@ let S=null, sel=null, lastStamp=-1, curveDrag=-1, panDrag=null;
 async function api(path, body){const r=await fetch(path,{method:body?'POST':'GET',
   headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
   return r.headers.get('content-type')?.includes('json')?r.json():r.text();}
+let polling=false, pollAgain=false, imgBusy=false;
 async function poll(){
-  const s=await api('/api/status');
-  const pct=s.running&&s.total?Math.round(100*s.stage/s.total):100;
-  document.getElementById('bar').style.width=pct+'%';
-  document.getElementById('prog').textContent=s.running
-    ?`${s.node} ${s.stage}/${s.total} ~${s.elapsed}s`
-    :(s.error?('error: '+s.error):(s.last_ms?`${s.last_ms} ms`:'idle'));
-  if(s.stamp!==lastStamp){lastStamp=s.stamp;
-    const im=document.getElementById('img');
-    im.src='/api/preview?t='+s.stamp;
-    im.style.transform='none';
-    syncMap();
-  const ft=document.getElementById('ftype');
-  if(ft) ft.innerHTML=Object.keys(S.filter_defs||{}).map(t=>`<option>${t}</option>`).join('');}
-  if(s.running)setTimeout(poll,300);
+  if(polling){pollAgain=true;return;}
+  polling=true;
+  try{
+    const s=await api('/api/status');
+    const pct=s.running&&s.total?Math.round(100*s.stage/s.total):100;
+    document.getElementById('bar').style.width=pct+'%';
+    document.getElementById('prog').textContent=s.running
+      ?`${s.node} ${s.stage}/${s.total} ${Number(s.elapsed).toFixed(1)}s`
+      :(s.error?('error: '+s.error)
+        :(imgBusy?'loading image…':(s.last_ms?`${s.last_ms} ms`:'idle')));
+    if(s.stamp!==lastStamp){
+      lastStamp=s.stamp;
+      const im=document.getElementById('img');
+      imgBusy=true;
+      im.onload=()=>{imgBusy=false;poll();};
+      im.onerror=()=>{imgBusy=false;};
+      im.src='/api/preview?t='+s.stamp;
+      im.style.transform='none';
+      syncMap();
+    }
+    if(s.running)setTimeout(poll,250);
+  }finally{
+    polling=false;
+    if(pollAgain){pollAgain=false;setTimeout(poll,120);}
+  }
 }
-function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
+function render(){api('/api/render',{}).then(()=>poll());}
 function mapUrl(r){
   return `/api/map?x0=${r.x0}&y0=${r.y0}&w=${Math.round(r.w)}&h=${Math.round(r.h)}&t=${Date.now()}`;
 }
@@ -766,6 +797,8 @@ async function boot(){
   rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
   scale.value=String(S.region.scale);
   renderTop(); renderNodes(); renderMasks();
+  const ft=document.getElementById('ftype');
+  if(ft) ft.innerHTML=Object.keys(S.filter_defs||{}).map(t=>`<option>${t}</option>`).join('');
   loadPresets();
   const known=(S.filters||[]).some(f=>f.id===S.last)||S.nodes[S.last];
   select(known?S.last:((S.filters&&S.filters[0])?S.filters[0].id:'height'));
@@ -1039,8 +1072,8 @@ for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=()=>
 document.getElementById('scale').onchange=()=>{const r=region();
   api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
     if(S.auto)render();else poll();});};
-document.getElementById('chan').onchange=()=>{api('/api/set',{id:'channel',k:'all',v:chan.value})
-  .then(()=>{ if(S.auto)render(); else poll();});};
+document.getElementById('chan').onchange=()=>{const v=chan.value;
+  api('/api/set',{id:'channel',k:'all',v}).then(()=>{S.channel=v;render();});};
 const prev=document.getElementById('prev');
 let panTimer=null;
 async function pushRegion(fast){
@@ -1077,6 +1110,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
+        self.send_header("cache-control", "no-store")
         self.send_header("content-length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
