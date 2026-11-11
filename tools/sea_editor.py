@@ -724,7 +724,7 @@ function field(kind,id,k,v,opts){
     inp=document.createElement('select');
     inp.innerHTML=['add','multiply'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
     inp.onchange=()=>set(kind,id,k,inp.value);
-    inp.title=(window.DESC||{})[kind+'.'+id+'.'+k]||'';
+    inp.title=(window.DESC||{})[id+'.'+k]||'';
     return [lab,inp];
   }
   if(kind==='mask'&&k==='tap'||opts&&opts.select){
@@ -741,7 +741,8 @@ function field(kind,id,k,v,opts){
     inp=document.createElement('input'); inp.type='text'; inp.value=v;
     inp.onchange=()=>set(kind,id,k,inp.value);
   }
-  inp.title=(window.DESC||{})[kind+'.'+id+'.'+k]
+  const dkey = (kind==='mask') ? ('mask.'+k) : (id+'.'+k);
+  inp.title=(window.DESC||{})[dkey]
     || (k==='enabled'?'enabled: off = this node passes its input straight through':'');
   return [lab,inp];
 }
