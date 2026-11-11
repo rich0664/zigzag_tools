@@ -14,12 +14,19 @@ Architecture (per the re-plan):
 Renders a single crop by default so iterations are cheap.
 """
 import os
+import urllib.request
 import numpy as np
 from PIL import Image, ImageFilter
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORK = os.path.join(ROOT, "out", "sea")
+MAP_URL = "https://d79e46apek3bq.cloudfront.net/maps/64/2026-11-01T22-21-31Z/map.png"
 MAP_PNG = os.path.join(WORK, "map.png")
+
+os.makedirs(WORK, exist_ok=True)
+if not os.path.exists(MAP_PNG):
+    print("downloading map raster…")
+    urllib.request.urlretrieve(MAP_URL, MAP_PNG)
 
 # crop in map tiles, plus context for the distance field
 X0, Y0, X1, Y1 = 2800, 2150, 4350, 3200
