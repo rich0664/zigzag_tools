@@ -542,9 +542,14 @@ def f_warp(h, node, ctx):
     sc_t = float(node["scale"])
     w1 = (sc.fbm(W, H, sc_t, 3, seed=int(node["seed"])) - 0.5) * float(node["tiles"])
     w2 = (sc.fbm(W, H, sc_t, 3, seed=int(node["seed"]) + 1) - 0.5) * float(node["tiles"])
-    yi, xi = np.mgrid[0:H, 0:W]
-    out = h[np.clip((yi + w1).astype(np.int32), 0, H - 1),
-            np.clip((xi + w2).astype(np.int32), 0, W - 1)]
+    # float row/column vectors broadcast to int32 indices: same pixels as a
+    # full int64 mgrid for about a third of the memory
+    yf = np.arange(H, dtype=np.float32)[:, None]
+    xf = np.arange(W, dtype=np.float32)[None, :]
+    rows = np.clip(yf + w1, 0, H - 1).astype(np.int32)
+    cols = np.clip(xf + w2, 0, W - 1).astype(np.int32)
+    out = h[rows, cols]
+    del rows, cols
     # a wired mask limits where the displacement applies
     m = mask_weight(node, ctx)
     if not np.isscalar(m):
@@ -619,7 +624,8 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
         t_node = time.perf_counter()
 
         chain_sig = sig(prev_sig, nid, node,
-                        [STATE["masks"][m] for m in node.get("masks", [])],
+                        [STATE["masks"][m] for m in node.get("masks", [])
+                         if m in STATE["masks"]],
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
         prev_sig = chain_sig
@@ -1459,10 +1465,11 @@ class Handler(BaseHTTPRequestHandler):
                 with open(path) as f:
                     data = json.load(f)
                 STATE["region"] = data["region"]
-                for k in ("nodes", "masks"):
-                    for nid, params in data.get(k, {}).items():
-                        if nid in STATE[k]:
-                            STATE[k][nid].update(params)
+                for nid, params in data.get("nodes", {}).items():
+                    if nid in STATE["nodes"]:
+                        STATE["nodes"][nid].update(params)
+                if "masks" in data:
+                    STATE["masks"] = data["masks"]
                 if "filters" in data:
                     STATE["filters"] = data["filters"]
                 STATE["next_filter"] = data.get("next_filter", len(STATE["filters"]) + 1)
