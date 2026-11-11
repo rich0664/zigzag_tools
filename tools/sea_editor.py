@@ -545,11 +545,20 @@ def f_warp(h, node, ctx):
     yi, xi = np.mgrid[0:H, 0:W]
     out = h[np.clip((yi + w1).astype(np.int32), 0, H - 1),
             np.clip((xi + w2).astype(np.int32), 0, W - 1)]
+    # a wired mask limits where the displacement applies
+    m = mask_weight(node, ctx)
+    if not np.isscalar(m):
+        out = h + (out - h) * m
     return out.astype(np.float32), None
 
 
 def f_blur(h, node, ctx):
-    return sc.box_blur(h, max(1, int(round(float(node["radius"])))), 2), None
+    b = sc.box_blur(h, max(1, int(round(float(node["radius"])))), 2)
+    # a wired mask limits the blur to that area instead of softening everything
+    m = mask_weight(node, ctx)
+    if not np.isscalar(m):
+        b = h + (b - h) * m
+    return b.astype(np.float32), None
 
 
 def _as_filter(fn):
@@ -1082,7 +1091,8 @@ function renderParams(){
     for(const mid of Object.keys(S.masks)){
       const l=document.createElement('label'); const cb=document.createElement('input');
       cb.type='checkbox'; cb.checked=(filt.masks||[]).includes(mid);
-      l.title='wire this mask into the filter: its contribution is multiplied by it';
+      l.title='wire this mask into the filter: the effect only applies where the mask '
+        + 'is on (blur and warp) or is scaled by it (noise, features, erode, drainage, shelf)';
       cb.title=l.title;
       cb.onchange=()=>{const arr=new Set(filt.masks||[]);
         cb.checked?arr.add(mid):arr.delete(mid); set('filters',sel,'masks',[...arr]);};
