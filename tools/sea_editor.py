@@ -54,15 +54,20 @@ def default_state():
             "distance": dict(enabled=True, down=2),
             "warp": dict(enabled=False, tiles=46.0, scale=700),
             "height": dict(enabled=True, mode="profile", deep_dist=1600.0,
-                           curve=1.0, shelf_t=0.10, slope_t=0.32, abyss_t=1.0),
+                           curve=1.0, shelf_t=0.10, slope_t=0.32, abyss_t=1.0,
+                           out_curve=[[0, 0], [1, 1]]),
             "noise": dict(enabled=False, amp=0.15, scale=350, octaves=4, seed=11,
-                          blend="add", masks=[]),
+                          blend="add", masks=[], out_curve=[[0, 0], [1, 1]]),
             "features": dict(enabled=False, amp=0.12, scale=70, density=0.70,
-                             octaves=4, seed=9, masks=[]),
-            "erode": dict(enabled=True, window=6, layers=20, mix=1.0, masks=[]),
+                             octaves=4, seed=9, masks=[],
+                             out_curve=[[0, 0], [1, 1]]),
+            "erode": dict(enabled=True, window=6, layers=20, mix=1.0, masks=[],
+                          out_curve=[[0, 0], [1, 1]]),
             "drainage": dict(enabled=False, scale=4, steps=4, k=2.0, m=0.5,
-                             n=1.0, cap=0.15, strength=1.0, masks=[]),
-            "shelf": dict(enabled=False, gain=1.0, power=1.0, masks=[]),
+                             n=1.0, cap=0.15, strength=1.0, masks=[],
+                             out_curve=[[0, 0], [1, 1]]),
+            "shelf": dict(enabled=False, gain=1.0, power=1.0, masks=[],
+                          out_curve=[[0, 0], [1, 1]]),
             "shade": dict(enabled=False, amp=1.45, lo=0.76, hi=1.24),
             "palette": dict(enabled=True),
             "coast": dict(enabled=False, levels=4, strength=0.13,
@@ -70,13 +75,14 @@ def default_state():
             "output": dict(enabled=True, land_t=0.58),
         },
         "masks": {
-            "depth_band": dict(source="height", scale=400, lo=0.15, hi=0.70,
+            "depth_band": dict(source="height", tap="", scale=400, lo=0.15, hi=0.70,
                                feather=0.1, invert=False),
-            "open_water": dict(source="distance", scale=400, lo=40, hi=160,
+            "open_water": dict(source="distance", tap="", scale=400, lo=40, hi=160,
                                feather=1.0, invert=False),
-            "big_noise": dict(source="noise", scale=900, lo=0.3, hi=0.7,
+            "big_noise": dict(source="noise", tap="", scale=900, lo=0.3, hi=0.7,
                               feather=1.0, invert=False),
         },
+        "next_mask": 1,
     }
 
 
@@ -118,12 +124,15 @@ def sig(*parts):
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=float).encode()).hexdigest()[:16]
 
 
-def mask_field(mask, ctx):
+def mask_field(mask, ctx, fallback=None):
     src = mask["source"]
     if src == "distance":
         v = ctx["d"]
     elif src == "height":
-        v = ctx["h"]
+        tap = mask.get("tap") or ""
+        v = ctx.get("fields", {}).get(tap)
+        if v is None:
+            v = fallback if fallback is not None else ctx["h"]
     else:
         v = sc.fbm(ctx["d"].shape[1], ctx["d"].shape[0], max(8.0, float(mask["scale"])),
                    4, seed=int(mask.get("seed", 3)))
@@ -132,7 +141,7 @@ def mask_field(mask, ctx):
     return 1.0 - t if mask["invert"] else t
 
 
-def mask_weight(node, ctx):
+def mask_weight(node, ctx, nid=None):
     ids = node.get("masks") or []
     if not ids:
         return 1.0
@@ -140,7 +149,7 @@ def mask_weight(node, ctx):
     for mid in ids:
         m = STATE["masks"].get(mid)
         if m:
-            w = w * mask_field(m, ctx)
+            w = w * mask_field(m, ctx, ctx.get("h"))
     return w
 
 
@@ -309,6 +318,8 @@ def n_drainage(node, ctx, prev_sig):
     return np.clip(h - dh_up * w, 0, 1), None
 
 
+SCALAR_NODES = {"height", "noise", "features", "erode", "drainage", "shelf"}
+
 ORDER = [
     ("distance", n_distance), ("warp", n_warp), ("height", n_height),
     ("noise", n_noise), ("features", n_features), ("erode", n_erode),
@@ -330,6 +341,7 @@ def evaluate(progress=None):
     for i, (nid, fn) in enumerate(ORDER):
         if progress:
             progress(i, total, nid)
+        _render["node"] = nid
         node = STATE["nodes"][nid]
         chain_sig = sig(chain_sig, nid, node, [STATE["masks"][m] for m in node.get("masks", [])],
                         region.get("x0"), region.get("y0"), region.get("w"),
@@ -342,9 +354,18 @@ def evaluate(progress=None):
                 val = None
             else:
                 val, _ = fn(node, ctx, chain_sig)
+                pts = node.get("out_curve")
+                if (isinstance(val, np.ndarray) and nid in SCALAR_NODES
+                        and pts and len(pts) >= 2):
+                    xs = [float(p[0]) for p in pts]
+                    ys = [float(p[1]) for p in pts]
+                    val = np.interp(val, xs, ys).astype(np.float32)
             _cache[nid] = (chain_sig, val)
         new_cache[nid] = (chain_sig, val)
 
+        ctx.setdefault("fields", {})
+        if isinstance(val, np.ndarray) and val.ndim == 2:
+            ctx["fields"][nid] = val
         if nid == "distance":
             ctx["d"] = val if val is not None else ctx["d"]
         elif nid in ("warp",):
@@ -363,6 +384,10 @@ def evaluate(progress=None):
 
 
 def channel_image(ctx, channel):
+    if channel in STATE["masks"]:
+        v = mask_field(STATE["masks"][channel], ctx, ctx.get("h"))
+        v = np.asarray(v, dtype=np.float32)
+        return np.stack([v * 255] * 3, -1).astype(np.uint8)
     if channel == "output":
         rgb = ctx.get("out")
         if rgb is None:
@@ -445,25 +470,28 @@ PAGE = r"""<!doctype html><meta charset=utf-8><title>sea editor</title>
 :root{--b:#1c2530;--p:#0d141b;--t:#c9d6e2;--a:#3f7fa6}
 *{box-sizing:border-box} body{margin:0;background:var(--p);color:var(--t);
 font:12px/1.4 ui-monospace,monospace;display:flex;height:100vh;overflow:hidden}
-#left,#right{width:250px;background:var(--b);overflow:auto;padding:8px}
+#left,#right{width:260px;background:var(--b);overflow:auto;padding:8px;flex:0 0 auto}
 #mid{flex:1;display:flex;flex-direction:column;min-width:0}
-#top{display:flex;gap:8px;padding:6px;background:var(--b);align-items:center;flex-wrap:wrap}
+#top{display:flex;gap:6px;padding:6px;background:var(--b);align-items:center;flex-wrap:wrap}
 #prev{flex:1;overflow:hidden;position:relative;cursor:grab;display:flex;
 align-items:center;justify-content:center;background:#0a1016}
 #prev img{position:static;image-rendering:pixelated;max-width:100%;max-height:100%}
-#top input[type=number]{width:64px}
-.node{padding:3px 6px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
+.node{padding:2px 5px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
 .node.sel{background:#24405a}.node input{cursor:pointer}
-label{display:block;margin:6px 0 2px;color:#8fa6ba}
-input[type=range]{width:100%} input[type=number],input[type=text],select{width:100%;
-background:#0b1117;color:var(--t);border:1px solid #2a3a4b;padding:2px 4px}
+.x{margin-left:auto;color:#8fa6ba;padding:0 4px}.x:hover{color:#e08a8a}
+label{display:block;margin:5px 0 2px;color:#8fa6ba}
+input[type=number],input[type=text],select{width:100%;background:#0b1117;color:var(--t);
+border:1px solid #2a3a4b;padding:2px 4px}
 button{background:#24405a;color:var(--t);border:0;padding:4px 8px;cursor:pointer;border-radius:3px}
 h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter-spacing:.08em}
 #barwrap{height:18px;background:#0a1016;position:relative;flex:0 0 auto}
 #bar{height:100%;width:0;background:#2f6a8c;transition:width .12s linear}
 #prog{position:absolute;left:8px;top:0;line-height:18px;font-size:11px;color:#cfe0ee}
+canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-top:4px}
+.small{color:#7d93a6}
 </style>
-<div id=left><h3>pipeline</h3><div id=nodes></div><h3>masks</h3><div id=masks></div></div>
+<div id=left><h3>pipeline</h3><div id=nodes></div>
+  <h3>masks <button id=addmask style="padding:1px 6px">+</button></h3><div id=masks></div></div>
 <div id=mid>
   <div id=top>
     x<input id=rx type=number size=5> y<input id=ry type=number size=5>
@@ -472,41 +500,41 @@ h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter
     <select id=chan></select>
     <button id=go>render</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
-    <button id=save>save preset</button><button id=load>load preset</button>
-    <button id=reset>reset</button>
+    <select id=presets style="width:auto;min-width:90px"></select>
+    <button id=load>load</button><button id=save>save</button><button id=reset>reset</button>
   </div>
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
   <div id=prev><img id=img></div>
 </div>
-<div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div><h3>masks wired</h3><div id=wired></div></div>
+<div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
+  <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div></div>
 <script>
-let S=null, sel=null;
+let S=null, sel=null, lastStamp=-1, curveDrag=-1, panDrag=null;
 async function api(path, body){const r=await fetch(path,{method:body?'POST':'GET',
   headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
   return r.headers.get('content-type')?.includes('json')?r.json():r.text();}
-let lastStamp=-1;
-function refresh(){poll();}
 async function poll(){
   const s=await api('/api/status');
   const pct=s.running&&s.total?Math.round(100*s.stage/s.total):100;
-  bar.style.width=pct+'%';
-  prog.textContent=s.running?`${s.node} ${s.stage}/${s.total} ~${s.elapsed}s`
-     :(s.error?('error: '+s.error):(s.last_ms?`${s.last_ms} ms`:'idle'));
-  if(s.stamp!==lastStamp){lastStamp=s.stamp;img.src='/api/preview?t='+s.stamp;}
+  document.getElementById('bar').style.width=pct+'%';
+  document.getElementById('prog').textContent=s.running
+    ?`${s.node} ${s.stage}/${s.total} ~${s.elapsed}s`
+    :(s.error?('error: '+s.error):(s.last_ms?`${s.last_ms} ms`:'idle'));
+  if(s.stamp!==lastStamp){lastStamp=s.stamp;
+    document.getElementById('img').src='/api/preview?t='+s.stamp;}
   if(s.running)setTimeout(poll,300);
 }
 function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
-document.getElementById('go').onclick=render;
-document.getElementById('reset').onclick=async()=>{
-  if(!confirm('reset all nodes to defaults?'))return;
-  await api('/api/reset',{}); S=await api('/api/state'); renderNodes(); renderMasks();
-  renderTop(); renderParams(); render();};
-document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
-async function init(){
+async function boot(){
   S=await api('/api/state');
   document.getElementById('auto').checked=!!S.auto;
-  renderNodes(); renderMasks(); renderTop(); select(S.last||'erode');
-  render();
+  rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
+  scale.value=String(S.region.scale);
+  renderTop(); renderNodes(); renderMasks(); select(S.last||'erode');
+  loadPresets(); render();
+}
+function renderTop(){
+  chan.innerHTML=S.channels.map(c=>`<option ${c===S.channel?'selected':''}>${c}</option>`).join('');
 }
 function renderNodes(){
   const el=document.getElementById('nodes'); el.innerHTML='';
@@ -514,7 +542,7 @@ function renderNodes(){
     const n=S.nodes[id]; if(!n) continue;
     const d=document.createElement('div'); d.className='node'+(sel===id?' sel':'');
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=n.enabled;
-    cb.onclick=e=>{e.stopPropagation(); setParam(id,'enabled',cb.checked);};
+    cb.onclick=e=>{e.stopPropagation(); set('nodes',id,'enabled',cb.checked);};
     d.appendChild(cb); d.appendChild(document.createTextNode(id));
     d.onclick=()=>select(id); el.appendChild(d);
   }
@@ -522,73 +550,137 @@ function renderNodes(){
 function renderMasks(){
   const el=document.getElementById('masks'); el.innerHTML='';
   for(const id of Object.keys(S.masks)){
+    const m=S.masks[id];
     const d=document.createElement('div'); d.className='node'+(sel===id?' sel':'');
-    d.textContent=id+" ("+S.masks[id].source+")";
-    d.onclick=()=>select(id); el.appendChild(d);
+    d.appendChild(document.createTextNode(id+' · '+m.source));
+    const x=document.createElement('span'); x.className='x'; x.textContent='×';
+    x.onclick=e=>{e.stopPropagation(); api('/api/mask/del',{id}).then(reload);};
+    d.appendChild(x); d.onclick=()=>select(id); el.appendChild(d);
   }
 }
-function renderTop(){
-  const r=S.region;
-  rx.value=r.x0; ry.value=r.y0; rw.value=r.w; rh.value=r.h; scale.value=String(r.scale);
-  chan.innerHTML=S.channels.map(c=>`<option ${c===S.channel?'selected':''}>${c}</option>`).join('');
+async function loadPresets(){
+  const r=await api('/api/presets');
+  document.getElementById('presets').innerHTML=r.presets.map(n=>`<option>${n}</option>`).join('');
 }
-async function select(id){sel=id; await api('/api/select',{id}); renderParams();
-  renderNodes(); renderMasks();}
+async function reload(){S=await api('/api/state'); renderTop(); renderNodes();
+  renderMasks(); renderParams();}
+async function select(id){sel=id; await api('/api/select',{id});
+  document.getElementById('nodeTitle').textContent=id;
+  renderParams(); renderNodes(); renderMasks();}
+function field(kind,id,k,v,opts){
+  const lab=document.createElement('label'); lab.textContent=k;
+  let inp;
+  if(kind==='mask'&&k==='tap'||opts&&opts.select){
+    inp=document.createElement('select');
+    inp.innerHTML=(opts&&opts.options||[]).map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
+    inp.onchange=()=>set(kind,id,k,inp.value);
+  } else if(typeof v==='boolean'){
+    inp=document.createElement('input'); inp.type='checkbox'; inp.checked=v;
+    inp.onchange=()=>set(kind,id,k,inp.checked);
+  } else if(typeof v==='number'){
+    inp=document.createElement('input'); inp.type='number'; inp.step='any'; inp.value=v;
+    inp.onchange=()=>set(kind,id,k,parseFloat(inp.value));
+  } else {
+    inp=document.createElement('input'); inp.type='text'; inp.value=v;
+    inp.onchange=()=>set(kind,id,k,inp.value);
+  }
+  return [lab,inp];
+}
 function renderParams(){
   const el=document.getElementById('params'); el.innerHTML='';
-  document.getElementById('nodeTitle').textContent=sel;
-  const n=S.nodes[sel]||S.masks[sel];
-  if(!n) return;
-  for(const [k,v] of Object.entries(n)){
-    if(k==='enabled'||k==='masks') continue;
-    const lab=document.createElement('label'); lab.textContent=k; el.appendChild(lab);
-    let inp;
-    if(typeof v==='boolean'){inp=document.createElement('input');inp.type='checkbox';inp.checked=v;
-      inp.onchange=()=>setParam(sel,k,inp.checked);}
-    else if(typeof v==='number'){inp=document.createElement('input');inp.type='number';inp.step='any';inp.value=v;
-      inp.onchange=()=>setParam(sel,k,parseFloat(inp.value));}
-    else if(typeof v==='string'){inp=document.createElement('input');inp.type='text';inp.value=v;
-      inp.onchange=()=>setParam(sel,k,inp.value);}
-    else {inp=document.createElement('input');inp.type='text';inp.value=JSON.stringify(v);inp.disabled=true;}
-    el.appendChild(inp);
-  }
-  const wired=document.getElementById('wired'); wired.innerHTML='';
-  if(S.nodes[sel]&&S.nodes[sel].masks!==undefined){
+  document.getElementById('curvewrap').innerHTML='';
+  const node=S.nodes[sel], mask=S.masks[sel];
+  if(mask){
+    for(const [k,v] of Object.entries(mask)){
+      if(k==='tap'){
+        const o=[''].concat(S.taps);
+        el.append(...field('mask',sel,k,v,{select:true,options:o}));
+      } else if(k==='source'){
+        el.append(...field('mask',sel,k,v,{select:true,options:['height','distance','noise']}));
+      } else {
+        el.append(...field('mask',sel,k,v));
+      }
+    }
+  } else if(node){
+    for(const [k,v] of Object.entries(node)){
+      if(k==='masks'||k==='out_curve') continue;
+      el.append(...field('nodes',sel,k,v));
+    }
+    if(node.out_curve){
+      const w=document.getElementById('curvewrap');
+      const h=document.createElement('h3'); h.textContent='output curve';
+      w.appendChild(h); w.appendChild(curveUI(node.out_curve,
+        pts=>set('nodes',sel,'out_curve',pts)));
+    }
+    const wired=document.getElementById('wired'); wired.innerHTML='';
     for(const mid of Object.keys(S.masks)){
-      const l=document.createElement('label'); const cb=document.createElement('input'); cb.type='checkbox';
-      cb.checked=S.nodes[sel].masks.includes(mid);
-      cb.onchange=()=>{const arr=new Set(S.nodes[sel].masks);
-        cb.checked?arr.add(mid):arr.delete(mid); setParam(sel,'masks',[...arr]);};
+      const l=document.createElement('label'); const cb=document.createElement('input');
+      cb.type='checkbox'; cb.checked=(node.masks||[]).includes(mid);
+      cb.onchange=()=>{const arr=new Set(node.masks||[]);
+        cb.checked?arr.add(mid):arr.delete(mid); set('nodes',sel,'masks',[...arr]);};
       l.appendChild(cb); l.appendChild(document.createTextNode(mid)); wired.appendChild(l);
     }
+  } else { document.getElementById('wired').innerHTML=''; }
+}
+function curveUI(pts, cb){
+  const size=180, c=document.createElement('canvas'); c.width=c.height=size; c.className='curve';
+  const g=c.getContext('2d');
+  function draw(){
+    g.fillStyle='#0b1117'; g.fillRect(0,0,size,size);
+    g.strokeStyle='#22303d'; g.lineWidth=1;
+    for(let i=1;i<4;i++){g.beginPath();g.moveTo(i*size/4,0);g.lineTo(i*size/4,size);
+      g.moveTo(0,i*size/4);g.lineTo(size,i*size/4);g.stroke();}
+    const P=[...pts].sort((a,b)=>a[0]-b[0]);
+    g.strokeStyle='#4f93bb'; g.lineWidth=2; g.beginPath();
+    P.forEach(([x,y],i)=>{const px=x*size,py=(1-y)*size;i?g.lineTo(px,py):g.moveTo(px,py);});
+    g.stroke(); g.fillStyle='#dbe7f1';
+    P.forEach(([x,y])=>{g.beginPath();g.arc(x*size,(1-y)*size,4,0,7);g.fill();});
   }
+  const pos=e=>{const r=c.getBoundingClientRect();
+    return [(e.clientX-r.left)/size,1-(e.clientY-r.top)/size];};
+  c.onmousedown=e=>{ if(e.button!==0) return; const [x,y]=pos(e);
+    let best=-1,bd=1e9; pts.forEach((p,i)=>{const d=(p[0]-x)**2+(p[1]-y)**2; if(d<bd){bd=d;best=i;}});
+    if(bd<0.02){curveDrag=best;} else {pts.push([x,y]);curveDrag=pts.length-1;}
+    draw(); };
+  c.oncontextmenu=e=>{e.preventDefault(); const [x,y]=pos(e);
+    let best=-1,bd=1e9; pts.forEach((p,i)=>{const d=(p[0]-x)**2+(p[1]-y)**2; if(d<bd){bd=d;best=i;}});
+    if(bd<0.02&&pts.length>2){pts.splice(best,1);draw();cb(pts);}};
+  addEventListener('mousemove',e=>{ if(curveDrag<0)return; const [x,y]=pos(e);
+    pts[curveDrag]=[Math.max(0,Math.min(1,x)),Math.max(0,Math.min(1,y))]; draw(); });
+  addEventListener('mouseup',()=>{ if(curveDrag>=0){curveDrag=-1;cb(pts);} });
+  draw(); return c;
 }
-async function setParam(id,k,v){
+async function set(kind,id,k,v){
   await api('/api/set',{id,k,v}); S=await api('/api/state');
-  if(id===sel) renderParams(); renderNodes();
-  if(S.auto) setTimeout(poll,120); else refresh();
+  if(S.auto) setTimeout(poll,120); else poll();
 }
-for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=e=>{
-  const r={x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value};
+document.getElementById('go').onclick=render;
+document.getElementById('addmask').onclick=()=>api('/api/mask/add',{}).then(reload);
+document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
+document.getElementById('reset').onclick=async()=>{ if(!confirm('reset to defaults?'))return;
+  await api('/api/reset',{}); await boot(); };
+const presets=document.getElementById('presets');
+document.getElementById('save').onclick=()=>{const n=prompt('save preset as',
+  presets.value||'preset'); if(n) api('/api/preset/save',{name:n}).then(loadPresets);};
+document.getElementById('load').onclick=async()=>{const n=presets.value;
+  if(n){await api('/api/preset/load',{name:n}); await boot();}};
+const region=()=>({x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value});
+for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=()=>{
+  const r=region(); api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
+    if(S.auto)render();else poll();});};
+document.getElementById('scale').onchange=()=>{const r=region();
   api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
-    if(S.auto)render();else refresh();});};
-scale.onchange=()=>{const r={...S.region,scale:+scale.value};
-  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
-    if(S.auto)render();else refresh();});};
-chan.onchange=()=>{api('/api/set',{id:'channel',k:'all',v:chan.value}).then(()=>{
-  if(S.auto)render();else refresh();});};
-save.onclick=()=>{const n=prompt('preset name','preset'); if(n) api('/api/preset/save',{name:n}).then(refresh);};
-load.onclick=async()=>{const n=prompt('preset name','preset'); if(n){await api('/api/preset/load',{name:n});
-  S=await api('/api/state'); renderNodes(); renderMasks(); renderTop(); refresh();}};
-let drag=null;
-prev.onmousedown=e=>{drag={x:e.clientX,y:e.clientY,x0:+rx.value,y0:+ry.value};prev.style.cursor='grabbing';};
-addEventListener('mousemove',e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;
-  rx.value=drag.x0-Math.round(dx/S.region.scale); ry.value=drag.y0-Math.round(dy/S.region.scale);});
-addEventListener('mouseup',()=>{if(!drag)return;drag=null;prev.style.cursor='grab';
-  const r={x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value};
-  api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
-    if(S.auto)render();else refresh();});});
-init();
+    if(S.auto)render();else poll();});};
+document.getElementById('chan').onchange=()=>{api('/api/set',{id:'channel',k:'all',v:chan.value})
+  .then(()=>{ if(S.auto)render(); else poll();});};
+const prev=document.getElementById('prev');
+prev.onmousedown=e=>{panDrag={x:e.clientX,y:e.clientY,x0:+rx.value,y0:+ry.value};prev.style.cursor='grabbing';};
+addEventListener('mousemove',e=>{if(!panDrag)return;const dx=e.clientX-panDrag.x,dy=e.clientY-panDrag.y;
+  rx.value=panDrag.x0-Math.round(dx/S.region.scale); ry.value=panDrag.y0-Math.round(dy/S.region.scale);});
+addEventListener('mouseup',()=>{if(!panDrag)return;panDrag=null;prev.style.cursor='grab';
+  const r=region(); api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
+    if(S.auto)render();else poll();});});
+boot();
 </script>"""
 
 
@@ -626,6 +718,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self._png(_png)
+        elif self.path == "/api/presets":
+            names = sorted(f[:-5] for f in os.listdir(PRESETS)) if os.path.isdir(PRESETS) else []
+            self._json({"presets": names})
         elif self.path == "/api/status":
             with _lock:
                 data = dict(_render)
@@ -636,7 +731,8 @@ class Handler(BaseHTTPRequestHandler):
                 st = {"region": STATE["region"], "channel": STATE["channel"],
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
                       "order": [n for n, _ in ORDER],
-                      "channels": ["output", "h", "d", "color"],
+                      "channels": ["output", "h", "d", "color"] + list(STATE["masks"].keys()),
+                      "taps": [n for n, _ in ORDER if n in SCALAR_NODES],
                       "last": STATE.get("last", "erode"), "auto": _render["auto"]}
             self._json(st)
         else:
@@ -647,7 +743,20 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length", 0))
         body = json.loads(self.rfile.read(n) or b"{}")
         with _lock:
-            if self.path == "/api/reset":
+            if self.path == "/api/mask/add":
+                n = STATE.get("next_mask", 1)
+                State_mid = f"mask_{n}"
+                STATE["next_mask"] = n + 1
+                STATE["masks"][State_mid] = dict(
+                    source="height", tap="", scale=400, lo=0.2, hi=0.8,
+                    feather=1.0, invert=False)
+            elif self.path == "/api/mask/del":
+                mid = body.get("id")
+                STATE["masks"].pop(mid, None)
+                for node in STATE["nodes"].values():
+                    if isinstance(node.get("masks"), list) and mid in node["masks"]:
+                        node["masks"].remove(mid)
+            elif self.path == "/api/reset":
                 STATE.clear()
                 STATE.update(default_state())
                 _cache.clear()
