@@ -269,6 +269,24 @@ def render_guard(r):
     return None
 
 
+_dist_full = None
+
+
+def dist_full():
+    """cached exact distance field, one value per map tile (read lazily, mmap)"""
+    global _dist_full
+    if _dist_full is None:
+        path = os.path.join(WORK, "dist_full.npy")
+        if os.path.exists(path):
+            try:
+                _dist_full = np.load(path, mmap_mode="r")
+            except Exception:
+                _dist_full = False
+        else:
+            _dist_full = False
+    return None if _dist_full is False else _dist_full
+
+
 _map_rgba = None
 
 
@@ -296,7 +314,12 @@ def load_region(region, cancel=None):
     xe = min(W, x0 + w + margin)
     ye = min(H, y0 + h + margin)
     sub = full[ys:ye, xs:xe]
-    d_sub = sc.edt(sub, down=int(STATE["nodes"]["distance"]["down"]), cancel=cancel)
+    df = dist_full()
+    if df is not None and df.shape == full.shape:
+        # the exact full-resolution field: previews then match the full build
+        d_sub = np.array(df[ys:ye, xs:xe], dtype=np.float32)
+    else:
+        d_sub = sc.edt(sub, down=int(STATE["nodes"]["distance"]["down"]), cancel=cancel)
     d = d_sub[(y0 - ys):(y0 - ys) + min(h, H - y0), (x0 - xs):(x0 - xs) + min(w, W - x0)]
     land = sub[(y0 - ys):(y0 - ys) + d.shape[0], (x0 - xs):(x0 - xs) + d.shape[1]]
     return land, d

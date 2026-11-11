@@ -153,6 +153,59 @@ def edt_small(mask, down=CFG["edt_down"], cancel=None):
     return np.sqrt(d) * down
 
 
+def _edt_1d(f):
+    """exact lower envelope of parabolas (Felzenszwalb & Huttenlocher), 1D"""
+    n = len(f)
+    d = [0.0] * n
+    v = [0] * n
+    z = [0.0] * (n + 1)
+    z[0] = -1e30
+    z[1] = 1e30
+    k = 0
+    for q in range(1, n):
+        s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k])
+        while s <= z[k]:
+            k -= 1
+            s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k])
+        k += 1
+        v[k] = q
+        z[k] = s
+        z[k + 1] = 1e30
+    k = 0
+    for q in range(n):
+        while z[k + 1] < q:
+            k += 1
+        dq = q - v[k]
+        d[q] = dq * dq + f[v[k]]
+    return d
+
+
+def edt_exact(mask, cancel=None):
+    """exact Euclidean distance in pixels at full resolution, O(n).
+
+    Same result as edt(mask, down=1) but linear: the vertical pass uses the
+    parabola envelope instead of scanning every row for every row."""
+    h, w = mask.shape
+    idx = np.arange(w, dtype=np.int32)[None, :]
+    BIG = 10 ** 6
+    left = idx - np.maximum.accumulate(np.where(mask, idx, -BIG), axis=1)
+    right = np.minimum.accumulate(np.where(mask, idx, BIG)[:, ::-1], axis=1)[:, ::-1] - idx
+    dx = np.minimum(left, right).astype(np.int32)
+    del left, right
+    dx = np.minimum(dx, 4096)
+    dx[mask] = 0
+    out = np.empty((h, w), np.float32)
+    step = 256
+    for c0 in range(0, w, step):
+        if cancel is not None:
+            cancel()
+        c1 = min(w, c0 + step)
+        block = (dx[:, c0:c1].astype(np.float64)) ** 2
+        for j in range(c1 - c0):
+            out[:, c0 + j] = np.sqrt(_edt_1d(block[:, j].tolist()))
+    return out
+
+
 def edt(mask, down=CFG["edt_down"], cancel=None):
     h, w = mask.shape
     return upscale(edt_small(mask, down, cancel=cancel), (w, h))

@@ -73,9 +73,17 @@ def main():
     out_w, out_h = int(round(W * args.scale)), int(round(H * args.scale))
 
     # global distance, resampled to the working resolution
-    d_half = np.load(os.path.join(WORK, "dist_half.npy"))
-    d_full = sc.upscale(d_half, (out_w, out_h)).astype(np.float32)
-    del d_half
+    full_path = os.path.join(WORK, "dist_full.npy")
+    if os.path.exists(full_path):
+        dist = np.load(full_path, mmap_mode="r")
+        if dist.shape != (out_h, out_w):
+            dist = sc.upscale(dist, (out_w, out_h))
+        d_full = np.asarray(dist, dtype=np.float32)
+        print("distance: dist_full.npy (exact, 1 per tile)", flush=True)
+    else:
+        d_half = np.load(os.path.join(WORK, "dist_half.npy"))
+        d_full = sc.upscale(d_half, (out_w, out_h)).astype(np.float32)
+        print("distance: dist_half.npy (2 tiles per value)", flush=True)
     if args.scale != 1.0:
         land_full = np.array(Image.fromarray(land_full).resize((out_w, out_h),
                                                                Image.NEAREST))
