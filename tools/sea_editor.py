@@ -208,19 +208,20 @@ def box2(a):
 
 
 def sorted_curve(pts):
-    """points sorted by x with duplicate x collapsed; None if unusable"""
-    p = sorted((float(a), float(b)) for a, b in pts)
-    xs, ys = [], []
-    for x, y in p:
-        x = min(1.0, max(0.0, x))
-        if xs and x <= xs[-1]:
-            x = xs[-1] + 1e-3      # keep every point; nudge instead of dropping
-            if x > 1.0:
-                continue
-        xs.append(x)
-        ys.append(y)
-    if len(xs) < 2:
+    """control points as strictly increasing x in [0,1]; None if unusable"""
+    p = sorted(((float(a), float(b)) for a, b in pts), key=lambda t: t[0])
+    n = len(p)
+    if n < 2:
         return None
+    gap = min(0.01, 0.9 / (n - 1))
+    xs = [min(1.0, max(0.0, x)) for x, _ in p]
+    ys = [y for _, y in p]
+    # duplicates (two points on x=1 is easy to make by dragging) must not drop a
+    # point: spread them out, then pull the whole run back inside [0,1]
+    for i in range(1, n):
+        xs[i] = max(xs[i], xs[i - 1] + gap)
+    for i in range(n - 1, -1, -1):
+        xs[i] = min(xs[i], 1.0 - (n - 1 - i) * gap)
     return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
 
 
@@ -600,8 +601,9 @@ def channel_image(ctx, channel):
     if val is None:
         val = np.zeros(ctx["land"].shape, np.float32)
     v = np.asarray(val, dtype=np.float32)
-    lo, hi = float(v.min()), float(v.max())
-    v = (v - lo) / max(1e-6, hi - lo)
+    if channel != "h":          # height is kept raw so curves are visible
+        lo, hi = float(v.min()), float(v.max())
+        v = (v - lo) / max(1e-6, hi - lo)
     return np.stack([v * 255] * 3, -1).astype(np.uint8)
 
 
@@ -1008,7 +1010,9 @@ function curveUI(pts, cb){
     pts[curveDrag]=[Math.max(0,Math.min(1,x)),Math.max(0,Math.min(1,y))]; draw(); });
   addEventListener('mouseup',()=>{ if(curveDrag>=0){curveDrag=-1;
     pts.sort((a,b)=>a[0]-b[0]);
-    for(let i=1;i<pts.length;i++) if(pts[i][0]<=pts[i-1][0]) pts[i][0]=Math.min(1,pts[i-1][0]+0.01);
+    const g=Math.min(0.01,0.9/(pts.length-1));
+    for(let i=1;i<pts.length;i++) pts[i][0]=Math.max(pts[i][0],pts[i-1][0]+g);
+    for(let i=pts.length-1;i>=0;i--) pts[i][0]=Math.min(pts[i][0],1-(pts.length-1-i)*g);
     draw(); cb(pts);} });
   draw(); return c;
 }
