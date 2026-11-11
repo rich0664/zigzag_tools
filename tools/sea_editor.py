@@ -50,6 +50,7 @@ def default_state():
     return {
         "region": {"x0": 2800, "y0": 2150, "w": 1200, "h": 800, "scale": 1.0},
         "channel": "output",
+        "overlay_map": False,
         "nodes": {
             "distance": dict(enabled=True, down=2),
             "warp": dict(enabled=False, tiles=46.0, scale=700),
@@ -69,7 +70,11 @@ def default_state():
             "shelf": dict(enabled=False, gain=1.0, power=1.0, masks=[],
                           out_curve=[[0, 0], [1, 1]]),
             "shade": dict(enabled=False, amp=1.45, lo=0.76, hi=1.24),
-            "palette": dict(enabled=True),
+            "palette": dict(enabled=True,
+                            stops=[0.0, 0.03, 0.07, 0.12, 0.20, 0.32, 0.46, 0.66, 1.0],
+                            cols=[[74, 126, 156], [58, 104, 134], [45, 86, 116],
+                                  [35, 70, 98], [28, 57, 82], [22, 46, 67],
+                                  [17, 36, 53], [12, 25, 37], [7, 13, 18]]),
             "coast": dict(enabled=False, levels=4, strength=0.13,
                           r=95, g=155, b=195),
             "output": dict(enabled=True, land_t=0.58),
@@ -302,9 +307,17 @@ def n_shade(node, ctx, prev_sig):
     return h, None
 
 
+def palette_arrays(node):
+    stops = np.array(node["stops"], dtype=np.float32)
+    cols = np.array(node["cols"], dtype=np.float32)
+    order = np.argsort(stops)
+    return stops[order], cols[order]
+
+
 def n_palette(node, ctx, prev_sig):
     t = np.clip(1.0 - ctx["h"], 0, 1)
-    rgb = np.stack([np.interp(t, sc.PALETTE_STOPS, sc.PALETTE_COLS[:, i]) for i in range(3)], -1)
+    stops, cols = palette_arrays(node)
+    rgb = np.stack([np.interp(t, stops, cols[:, i]) for i in range(3)], -1)
     sh = ctx.get("shade")
     if sh is not None:
         rgb = rgb * sh[:, :, None]
@@ -330,10 +343,11 @@ def n_coast(node, ctx, prev_sig):
 def n_output(node, ctx, prev_sig):
     rgb = ctx["color"].copy()
     land = ctx["land"]
-    if node.get("land_t") is not None:
-        t = np.clip(1.0 - np.where(land, 1.0 - float(node["land_t"]), 1.0), 0, 1)
-        # land fill keeps the top of the ramp so the shore stays the brightest
-        fill = np.array([sc.PALETTE_COLS[0][i] for i in range(3)], dtype=np.float32)
+    lt = node.get("land_t")
+    if lt is not None:
+        stops, cols = palette_arrays(STATE["nodes"]["palette"])
+        fill = np.array([np.interp(float(lt), stops, cols[:, i]) for i in range(3)],
+                        dtype=np.float32)
         rgb = np.where(land[:, :, None], fill, rgb)
     return np.clip(rgb, 0, 255).astype(np.uint8), None
 
@@ -530,6 +544,16 @@ def render_now(auto=False):
             stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
             ctx = evaluate(_progress, stop_at=stop or None)
             rgb = channel_image(ctx, ch)
+            if STATE.get("overlay_map") and ch == "output":
+                r = STATE["region"]
+                w = int(rgb.shape[1]); h = int(rgb.shape[0])
+                tile = Image.open(MAP_PNG).convert("RGBA").crop(
+                    (int(r["x0"]), int(r["y0"]), int(r["x0"]) + w, int(r["y0"]) + h))
+                if tile.size != (w, h):
+                    tile = tile.resize((w, h), Image.NEAREST)
+                base = Image.fromarray(rgb, "RGB").convert("RGBA")
+                base.alpha_composite(tile)
+                rgb = np.array(base)[:, :, :3]
             buf = io.BytesIO()
             Image.fromarray(rgb, "RGB").save(buf, "PNG")
             with _lock:
@@ -582,7 +606,9 @@ font:12px/1.4 ui-monospace,monospace;display:flex;height:100vh;overflow:hidden}
 #top select{width:auto}
 #prev{flex:1;overflow:hidden;position:relative;cursor:grab;display:flex;
 align-items:center;justify-content:center;background:#0a1016}
-#prev img{position:static;image-rendering:pixelated;max-width:100%;max-height:100%}
+#prev img{position:static;image-rendering:pixelated;max-width:100%;max-height:100%;
+pointer-events:none;user-select:none;-webkit-user-drag:none}
+#prev{user-select:none}
 .node{padding:2px 5px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
 .node.sel{background:#24405a}.node input{cursor:pointer}
 .x{margin-left:auto;color:#8fa6ba;padding:0 4px}.x:hover{color:#e08a8a}
@@ -609,11 +635,12 @@ canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-to
     <select id=chan></select>
     <button id=go>render</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
+    <label style="display:inline;color:var(--t)"><input id=mapover type=checkbox> map</label>
     <select id=presets style="width:auto;min-width:90px"></select>
     <button id=load>load</button><button id=save>save</button><button id=reset>reset</button>
   </div>
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
-  <div id=prev><img id=img></div>
+  <div id=prev><img id=img draggable=false></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
   <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div></div>
@@ -637,6 +664,7 @@ function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
 async function boot(){
   S=await api('/api/state'); window.DESC=S.desc||{};
   document.getElementById('auto').checked=!!S.auto;
+  document.getElementById('mapover').checked=!!S.overlay_map;
   rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
   scale.value=String(S.region.scale);
   renderTop(); renderNodes(); renderMasks(); select(S.last||'erode');
@@ -733,6 +761,9 @@ function renderParams(){
         el.append(...field('mask',sel,k,v));
       }
     }
+  } else if(sel==='palette' && node){
+    paletteEditor(node);
+    return;
   } else if(node){
     for(const [k,v] of Object.entries(node)){
       if(k==='masks'||k==='out_curve') continue;
@@ -753,6 +784,41 @@ function renderParams(){
       l.appendChild(cb); l.appendChild(document.createTextNode(mid)); wired.appendChild(l);
     }
   } else { document.getElementById('wired').innerHTML=''; }
+}
+function hex(c){return '#'+c.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('');}
+function unhex(h){return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
+function paletteEditor(node){
+  const box=document.getElementById('params');
+  const stops=[...node.stops], cols=node.cols.map(c=>[...c]);
+  const cv=document.createElement('canvas'); cv.width=230; cv.height=26; cv.className='curve';
+  const g=cv.getContext('2d');
+  const S2=[...stops].map((x,i)=>[x,i]).sort((a,b)=>a[0]-b[0]);
+  for(let x=0;x<230;x++){
+    const t=x/230; let c=cols[S2[0][1]];
+    for(let k=1;k<S2.length;k++){
+      const [x0,i0]=S2[k-1],[x1,i1]=S2[k];
+      if(t<=x1||k===S2.length-1){
+        const f=Math.max(0,Math.min(1,(t-x0)/Math.max(1e-6,x1-x0)));
+        c=[0,1,2].map(j=>cols[i0][j]*(1-f)+cols[i1][j]*f); break;
+      }
+    }
+    g.fillStyle=hex(c); g.fillRect(x,0,1,26);
+  }
+  box.appendChild(cv);
+  const commit=()=>set('nodes','palette',{stops,cols});
+  stops.forEach((st,i)=>{
+    const row=document.createElement('div'); row.className='node';
+    const p=document.createElement('input'); p.type='number'; p.step='0.01'; p.value=st;
+    p.style.width='64px'; p.onchange=()=>{stops[i]=parseFloat(p.value);commit();};
+    const c=document.createElement('input'); c.type='color'; c.value=hex(cols[i]);
+    c.style.width='40px'; c.onchange=()=>{cols[i]=unhex(c.value);commit();};
+    const x=document.createElement('span'); x.className='x'; x.textContent='×';
+    x.onclick=()=>{ if(stops.length<=2)return; stops.splice(i,1); cols.splice(i,1); commit(); };
+    row.append(p,c,x); box.appendChild(row);
+  });
+  const add=document.createElement('button'); add.textContent='add stop';
+  add.onclick=()=>{stops.push(0.5);cols.push([40,70,100]);commit();};
+  box.appendChild(add);
 }
 function curveUI(pts, cb){
   const size=180, c=document.createElement('canvas'); c.width=c.height=size; c.className='curve';
@@ -783,12 +849,14 @@ function curveUI(pts, cb){
   draw(); return c;
 }
 async function set(kind,id,k,v){
-  await api('/api/set',{id,k,v}); S=await api('/api/state');
+  await api('/api/set',{id,k,v}); S=await api('/api/state'); window.DESC=S.desc||{};
   if(S.auto) setTimeout(poll,120); else poll();
 }
 document.getElementById('go').onclick=render;
 document.getElementById('addmask').onclick=()=>api('/api/mask/add',{}).then(reload);
 document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
+document.getElementById('mapover').onchange=e=>{
+  api('/api/set',{id:'overlay',k:'all',v:e.target.checked}).then(()=>{S.overlay_map=e.target.checked;render();});};
 document.getElementById('reset').onclick=async()=>{ if(!confirm('reset to defaults?'))return;
   await api('/api/reset',{}); await boot(); };
 const presets=document.getElementById('presets');
@@ -861,6 +929,7 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/state":
             with _lock:
                 st = {"region": STATE["region"], "channel": STATE["channel"],
+                      "overlay_map": bool(STATE.get("overlay_map")),
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
                       "order": [n for n, _ in ORDER],
                       "channels": ["output", "h", "d", "color"] + list(STATE["masks"].keys()),
@@ -902,6 +971,8 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["region"] = val
                 elif nid == "channel":
                     STATE["channel"] = val
+                elif nid == "overlay":
+                    STATE["overlay_map"] = bool(val)
                 elif nid in STATE["nodes"]:
                     if key == "all":
                         STATE["nodes"][nid].update(val)
