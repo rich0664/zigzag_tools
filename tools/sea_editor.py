@@ -924,6 +924,11 @@ def render_now(gen=None):
                 _render["error"] = blocked
             print("render blocked:", blocked, flush=True)
             return False
+        if not STATE["nodes"]["height"].get("enabled", True):
+            if is_current(gen):
+                _render["error"] = ("the height node is off, so there is nothing "
+                                    "to render; switch it back on")
+            return False
         ch = STATE.get("channel", "output")
         stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
         region = dict(STATE["region"])
@@ -1577,7 +1582,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(data)
         elif self.path == "/api/state":
             with _lock:
-                taps = ["base"] + [f["id"] for f in STATE["filters"]]
+                taps = ["base"] + [f["id"] for f in walk_filters(STATE["filters"])]
                 st = {"region": STATE["region"], "channel": STATE["channel"],
                       "map": {"w": int(load_map().shape[1]),
                               "h": int(load_map().shape[0])},
@@ -1633,7 +1638,7 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/mask/del":
                 mid = body.get("id")
                 STATE["masks"].pop(mid, None)
-                for node in STATE["nodes"].values():
+                for node in list(STATE["nodes"].values()) + list(walk_filters(STATE["filters"])):
                     if isinstance(node.get("masks"), list) and mid in node["masks"]:
                         node["masks"].remove(mid)
             elif self.path == "/api/filter/name":
@@ -1666,17 +1671,18 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["nodes"][nid].update(val)
                     else:
                         STATE["nodes"][nid][key] = val
-                elif any(f["id"] == nid for f in STATE["filters"]):
-                    f = next(x for x in STATE["filters"] if x["id"] == nid)
-                    if key == "all":
-                        f.update(val)
-                    else:
-                        f[key] = val
-                elif nid in STATE["masks"]:
-                    if key == "all":
-                        STATE["masks"][nid].update(val)
-                    else:
-                        STATE["masks"][nid][key] = val
+                else:
+                    f = find_filter(nid)
+                    if f is not None:
+                        if key == "all":
+                            f.update(val)
+                        else:
+                            f[key] = val
+                    elif nid in STATE["masks"]:
+                        if key == "all":
+                            STATE["masks"][nid].update(val)
+                        else:
+                            STATE["masks"][nid][key] = val
             elif self.path == "/api/render":
                 pass          # started outside the lock, below
             elif self.path == "/api/select":
