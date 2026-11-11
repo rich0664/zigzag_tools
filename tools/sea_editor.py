@@ -269,6 +269,20 @@ def render_guard(r):
     return None
 
 
+_map_rgba = None
+
+
+def map_rgba():
+    """decoded map tile layer, kept in memory: reopening the PNG per crop meant
+    a 163 MB decode for every mouse move while panning"""
+    global _map_rgba
+    if _map_rgba is None:
+        im = Image.open(MAP_PNG).convert("RGBA")
+        im.load()
+        _map_rgba = im
+    return _map_rgba
+
+
 def load_region(region, cancel=None):
     full = load_map()
     s = float(region.get("scale", 1.0))
@@ -1090,6 +1104,11 @@ function render(){api('/api/render',{}).then(()=>poll());}
 function mapUrl(r){
   return `/api/map?x0=${r.x0}&y0=${r.y0}&w=${Math.round(r.w)}&h=${Math.round(r.h)}&t=${Date.now()}`;
 }
+let mapSoon=null;
+function syncMapSoon(){
+  if(mapSoon) return;
+  mapSoon=setTimeout(()=>{mapSoon=null;syncMap();},90);
+}
 function syncMap(){
   const mo=document.getElementById('mapov');
   const on=!!(S.nodes.output&&S.nodes.output.overlay_map);
@@ -1518,7 +1537,7 @@ addEventListener('mousemove',e=>{if(!panDrag)return;
   ry.value=+ry.value-Math.round(dy/S.region.scale);
   // nudge what we have immediately, then render the strip we are moving to
   const mo=document.getElementById('mapov');
-  if(S.nodes.output&&S.nodes.output.overlay_map) mo.src=mapUrl(region());   // cheap: it is just a crop
+  if(S.nodes.output&&S.nodes.output.overlay_map) syncMapSoon();
   // the sea is intentionally left stale until release
 });
 addEventListener('mouseup',()=>{if(!panDrag)return;panDrag=null;prev.style.cursor='grab';
@@ -1566,15 +1585,24 @@ class Handler(BaseHTTPRequestHandler):
             from urllib.parse import urlparse, parse_qs
             q = parse_qs(urlparse(self.path).query)
             try:
-                x0 = int(float(q.get("x0", [0])[0])); y0 = int(float(q.get("y0", [0])[0]))
-                w = int(float(q.get("w", [1200])[0])); h = int(float(q.get("h", [800])[0]))
-                tile = Image.open(MAP_PNG).convert("RGBA").crop((x0, y0, x0 + w, y0 + h))
+                im = map_rgba()
+                MW, MH = im.size
+                x0 = int(float(q.get("x0", [0])[0]))
+                y0 = int(float(q.get("y0", [0])[0]))
+                w = int(float(q.get("w", [1200])[0]))
+                h = int(float(q.get("h", [800])[0]))
+                if w < 1 or h < 1 or w > 8000 or h > 8000:
+                    raise ValueError("size")
+                x0 = max(0, min(MW - 1, x0))
+                y0 = max(0, min(MH - 1, y0))
+                tile = im.crop((x0, y0, min(MW, x0 + w), min(MH, y0 + h)))
                 if tile.size != (w, h):
                     tile = tile.resize((w, h), Image.NEAREST)
                 buf = io.BytesIO(); tile.save(buf, "PNG")
                 self._png(buf.getvalue())
             except Exception:
-                self.send_response(400); self.end_headers()
+                self.send_response(204)      # half-typed numbers: just show nothing
+                self.end_headers()
         elif self.path == "/api/presets":
             names = sorted(f[:-5] for f in os.listdir(PRESETS)) if os.path.isdir(PRESETS) else []
             self._json({"presets": names})
