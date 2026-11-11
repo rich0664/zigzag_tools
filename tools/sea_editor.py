@@ -741,7 +741,8 @@ function field(kind,id,k,v,opts){
     inp=document.createElement('input'); inp.type='text'; inp.value=v;
     inp.onchange=()=>set(kind,id,k,inp.value);
   }
-  inp.title=(window.DESC||{})[kind+'.'+id+'.'+k]||'';
+  inp.title=(window.DESC||{})[kind+'.'+id+'.'+k]
+    || (k==='enabled'?'enabled: off = this node passes its input straight through':'');
   return [lab,inp];
 }
 function renderParams(){
@@ -767,7 +768,16 @@ function renderParams(){
   } else if(node){
     for(const [k,v] of Object.entries(node)){
       if(k==='masks'||k==='out_curve') continue;
+      if(sel==='coast'&&['r','g','b'].includes(k)) continue;
       el.append(...field('nodes',sel,k,v));
+    }
+    if(sel==='coast'){
+      const lab=document.createElement('label'); lab.textContent='tint';
+      const c=document.createElement('input'); c.type='color';
+      c.value=hex([node.r,node.g,node.b]);
+      c.title='coastal tint colour, mixed in only where it lightens';
+      c.onchange=()=>{const [r,g,b]=unhex(c.value); set('nodes','coast','all',{r,g,b});};
+      el.append(lab,c);
     }
     if(node.out_curve){
       const w=document.getElementById('curvewrap');
@@ -791,6 +801,7 @@ function paletteEditor(node){
   const box=document.getElementById('params');
   const stops=[...node.stops], cols=node.cols.map(c=>[...c]);
   const cv=document.createElement('canvas'); cv.width=230; cv.height=26; cv.className='curve';
+  cv.title='resulting colour ramp';
   const g=cv.getContext('2d');
   const S2=[...stops].map((x,i)=>[x,i]).sort((a,b)=>a[0]-b[0]);
   for(let x=0;x<230;x++){
@@ -809,9 +820,11 @@ function paletteEditor(node){
   stops.forEach((st,i)=>{
     const row=document.createElement('div'); row.className='node';
     const p=document.createElement('input'); p.type='number'; p.step='0.01'; p.value=st;
-    p.style.width='64px'; p.onchange=()=>{stops[i]=parseFloat(p.value);commit();};
+    p.style.width='64px'; p.title='depth position of this colour stop (0 = shallowest)';
+    p.onchange=()=>{stops[i]=parseFloat(p.value);commit();};
     const c=document.createElement('input'); c.type='color'; c.value=hex(cols[i]);
-    c.style.width='40px'; c.onchange=()=>{cols[i]=unhex(c.value);commit();};
+    c.style.width='40px'; c.title='colour at this depth';
+    c.onchange=()=>{cols[i]=unhex(c.value);commit();};
     const x=document.createElement('span'); x.className='x'; x.textContent='×';
     x.onclick=()=>{ if(stops.length<=2)return; stops.splice(i,1); cols.splice(i,1); commit(); };
     row.append(p,c,x); box.appendChild(row);
