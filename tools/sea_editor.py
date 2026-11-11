@@ -950,10 +950,9 @@ addEventListener('mousemove',e=>{if(!panDrag)return;
   // nudge what we have immediately, then render the strip we are moving to
   const mo=document.getElementById('mapov');
   if(S.overlay_map) mo.src=mapUrl(region());   // cheap: it is just a crop
-  if(!panTimer) panTimer=setTimeout(()=>{panTimer=null;pushRegion(true);},200);
+  // the sea is intentionally left stale until release
 });
 addEventListener('mouseup',()=>{if(!panDrag)return;panDrag=null;prev.style.cursor='grab';
-  if(panTimer){clearTimeout(panTimer);panTimer=null;}
   pushRegion(false);});
 boot();
 </script>"""
