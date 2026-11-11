@@ -501,14 +501,17 @@ def evaluate(progress=None, stop_at=None, region=None):
     steps += [("palette", None), ("coast", None), ("output", None)]
 
     total = len(steps)
+    prev_sig = "0"
     for i, (nid, filt) in enumerate(steps):
         if progress:
             progress(i, total, nid)
         node = filt if filt is not None else STATE["nodes"][nid]
 
-        chain_sig = sig(nid, node, [STATE["masks"][m] for m in node.get("masks", [])],
+        chain_sig = sig(prev_sig, nid, node,
+                        [STATE["masks"][m] for m in node.get("masks", [])],
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
+        prev_sig = chain_sig
         cached = _cache.get(nid)
         if cached and cached[0] == chain_sig:
             val = cached[1]
@@ -519,7 +522,7 @@ def evaluate(progress=None, stop_at=None, region=None):
                     val = d
                 elif nid == "height":
                     val, contrib = n_height(node, ctx, chain_sig)
-                elif nid in FILTER_FN and filt is not None:
+                elif filt is not None:
                     val, contrib = FILTER_FN[filt["type"]](ctx["h"], node, ctx)
                 elif nid == "palette":
                     val, contrib = n_palette(node, ctx, chain_sig)
