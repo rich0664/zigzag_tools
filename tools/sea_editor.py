@@ -134,7 +134,7 @@ FILTER_DEFS = {
     # one floor depth per open patch: the sea is split at the sills between
     # deep points, and each patch gets its own level
     "basins": dict(threshold=60.0, spacing=120.0, levels=4, soft=40.0,
-                   amp=0.4, seed=5, blend="add"),
+                   amp=0.4, seed=5, blend="lighter"),
 }
 
 DESC = {
@@ -188,7 +188,9 @@ DESC = {
     "basins.levels": "how many distinct floor depths the patches are picked from",
     "basins.soft": "blur radius in tiles at the edges of a patch: 0 leaves a hard "
                    "step between two floors",
-    "basins.amp": "how far a patch can sit below (or above) the open water around it",
+    "basins.amp": "the highest a patch floor can sit, in height units (1 = shore); "
+                  "with blend lighter each patch is lifted to its own value, so low "
+                  "values stay deep",
     "basins.seed": "different assignment of depths to patches",
     "regions.amp": "how far a region can sit above or below the base depth",
     "regions.octaves": "detail within the regional field",
@@ -689,15 +691,16 @@ def f_basins(h, node, ctx):
     lv = max(1, int(node.get("levels", 4)))
     if lv > 1:
         vals = np.round(vals * lv) / lv
-    vals[0] = float(vals[1:].mean())          # unsplit water: no offset
-    shift = (vals[lab] - vals[1:].mean())
-    shift = np.array(Image.fromarray(shift.astype(np.float32), "F")
-                     .resize((W, H), Image.BILINEAR))
+    # each patch gets a floor height between 0 and amp; the contribution is the
+    # move needed to get there, so add sets the floor, lighter raises to it,
+    # darker lowers to it
+    target = (vals[lab] * float(node["amp"])).astype(np.float32)
+    target = np.array(Image.fromarray(target, "F").resize((W, H), Image.BILINEAR))
     r = int(max(0.0, float(node.get("soft", 40.0))))
     if r:
-        shift = sc.box_blur(shift, r, 2)
-    shift[ctx["land"]] = 0.0
-    c = (shift * float(node["amp"]) * mask_weight(node, ctx)).astype(np.float32)
+        target = sc.box_blur(target, r, 2)
+    target[ctx["land"]] = 1.0                 # never pull land down
+    c = ((target - h) * mask_weight(node, ctx)).astype(np.float32)
     return np.clip(h + c, 0, 1).astype(np.float32), c
 
 
