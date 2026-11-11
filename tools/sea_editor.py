@@ -51,6 +51,7 @@ def default_state():
         "region": {"x0": 2800, "y0": 2150, "w": 1200, "h": 800, "scale": 1.0},
         "channel": "output",
         "overlay_map": False,
+        "fast": False,
         "nodes": {
             "distance": dict(enabled=True, down=2),
             "warp": dict(enabled=False, tiles=46.0, scale=700),
@@ -462,10 +463,10 @@ ORDER = [
 ]
 
 
-def evaluate(progress=None, stop_at=None):
+def evaluate(progress=None, stop_at=None, region=None):
     """run the chain, reusing cache entries whose signature still matches"""
     global _cache
-    region = STATE["region"]
+    region = region or STATE["region"]
     land, d = load_region(region)
     ctx = {"land": land, "d": d, "h": None, "color": None}
     chain_sig = "0"
@@ -565,18 +566,17 @@ def render_now(auto=False):
         try:
             ch = STATE.get("channel", "output")
             stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
-            ctx = evaluate(_progress, stop_at=stop or None)
+            region = dict(STATE["region"])
+            fast = bool(STATE.get("fast"))
+            if fast:
+                region["scale"] = float(region.get("scale", 1.0)) * 0.5
+            ctx = evaluate(_progress, stop_at=stop or None, region=region)
             rgb = channel_image(ctx, ch)
-            if STATE.get("overlay_map") and ch == "output":
-                r = STATE["region"]
-                w = int(rgb.shape[1]); h = int(rgb.shape[0])
-                tile = Image.open(MAP_PNG).convert("RGBA").crop(
-                    (int(r["x0"]), int(r["y0"]), int(r["x0"]) + w, int(r["y0"]) + h))
-                if tile.size != (w, h):
-                    tile = tile.resize((w, h), Image.NEAREST)
-                base = Image.fromarray(rgb, "RGB").convert("RGBA")
-                base.alpha_composite(tile)
-                rgb = np.array(base)[:, :, :3]
+            if fast:      # keep the display size stable
+                out_w, out_h = int(STATE["region"]["w"]), int(STATE["region"]["h"])
+                rgb = np.array(Image.fromarray(rgb, "RGB").resize((out_w, out_h), Image.NEAREST))
+            # the real map is a separate overlay layer in the browser, so it can
+            # follow a drag without waiting for the sea render
             buf = io.BytesIO()
             Image.fromarray(rgb, "RGB").save(buf, "PNG")
             with _lock:
@@ -629,8 +629,9 @@ font:12px/1.4 ui-monospace,monospace;display:flex;height:100vh;overflow:hidden}
 #top select{width:auto}
 #prev{flex:1;overflow:hidden;position:relative;cursor:grab;display:flex;
 align-items:center;justify-content:center;background:#0a1016}
-#prev img{position:static;image-rendering:pixelated;max-width:100%;max-height:100%;
-pointer-events:none;user-select:none;-webkit-user-drag:none}
+#prev img{position:absolute;inset:0;margin:auto;image-rendering:pixelated;
+max-width:100%;max-height:100%;pointer-events:none;user-select:none;-webkit-user-drag:none}
+#mapov{opacity:1;transition:none}
 #prev{user-select:none}
 .node{padding:2px 5px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
 .node.sel{background:#24405a}.node input{cursor:pointer}
@@ -663,7 +664,7 @@ canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-to
     <button id=load>load</button><button id=save>save</button><button id=reset>reset</button>
   </div>
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
-  <div id=prev><img id=img draggable=false></div>
+  <div id=prev><img id=img draggable=false><img id=mapov draggable=false></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
   <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div></div>
@@ -680,14 +681,27 @@ async function poll(){
     ?`${s.node} ${s.stage}/${s.total} ~${s.elapsed}s`
     :(s.error?('error: '+s.error):(s.last_ms?`${s.last_ms} ms`:'idle'));
   if(s.stamp!==lastStamp){lastStamp=s.stamp;
-    document.getElementById('img').src='/api/preview?t='+s.stamp;}
+    const im=document.getElementById('img');
+    im.src='/api/preview?t='+s.stamp;
+    im.style.transform='none';
+    syncMap();}
   if(s.running)setTimeout(poll,300);
 }
 function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
+function mapUrl(r){
+  return `/api/map?x0=${r.x0}&y0=${r.y0}&w=${Math.round(r.w)}&h=${Math.round(r.h)}&t=${Date.now()}`;
+}
+function syncMap(){
+  const mo=document.getElementById('mapov');
+  const on=!!S.overlay_map;
+  mo.style.display=on?'block':'none';
+  if(on) mo.src=mapUrl(region());
+}
 async function boot(){
   S=await api('/api/state'); window.DESC=S.desc||{};
   document.getElementById('auto').checked=!!S.auto;
   document.getElementById('mapover').checked=!!S.overlay_map;
+  syncMap();
   rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
   scale.value=String(S.region.scale);
   renderTop(); renderNodes(); renderMasks(); select(S.last||'erode');
@@ -898,7 +912,8 @@ document.getElementById('go').onclick=render;
 document.getElementById('addmask').onclick=()=>api('/api/mask/add',{}).then(reload);
 document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
 document.getElementById('mapover').onchange=e=>{
-  api('/api/set',{id:'overlay',k:'all',v:e.target.checked}).then(()=>{S.overlay_map=e.target.checked;render();});};
+  api('/api/set',{id:'overlay',k:'all',v:e.target.checked}).then(()=>{
+    S.overlay_map=e.target.checked; syncMap();});};
 document.getElementById('reset').onclick=async()=>{ if(!confirm('reset to defaults?'))return;
   await api('/api/reset',{}); await boot(); };
 const presets=document.getElementById('presets');
@@ -916,12 +931,30 @@ document.getElementById('scale').onchange=()=>{const r=region();
 document.getElementById('chan').onchange=()=>{api('/api/set',{id:'channel',k:'all',v:chan.value})
   .then(()=>{ if(S.auto)render(); else poll();});};
 const prev=document.getElementById('prev');
-prev.onmousedown=e=>{panDrag={x:e.clientX,y:e.clientY,x0:+rx.value,y0:+ry.value};prev.style.cursor='grabbing';};
-addEventListener('mousemove',e=>{if(!panDrag)return;const dx=e.clientX-panDrag.x,dy=e.clientY-panDrag.y;
-  rx.value=panDrag.x0-Math.round(dx/S.region.scale); ry.value=panDrag.y0-Math.round(dy/S.region.scale);});
+let panTimer=null;
+async function pushRegion(fast){
+  await api('/api/set',{id:'fast',k:'all',v:fast});
+  const r=region();
+  await api('/api/set',{id:'region',k:'all',v:r});
+  S.region=r;
+  await api('/api/render',{});
+  setTimeout(poll,120);
+}
+prev.onmousedown=e=>{panDrag={x:e.clientX,y:e.clientY};
+  prev.style.cursor='grabbing';};
+addEventListener('mousemove',e=>{if(!panDrag)return;
+  const dx=e.clientX-panDrag.x, dy=e.clientY-panDrag.y;
+  panDrag.x=e.clientX; panDrag.y=e.clientY;
+  rx.value=+rx.value-Math.round(dx/S.region.scale);
+  ry.value=+ry.value-Math.round(dy/S.region.scale);
+  // nudge what we have immediately, then render the strip we are moving to
+  const mo=document.getElementById('mapov');
+  if(S.overlay_map) mo.src=mapUrl(region());   // cheap: it is just a crop
+  if(!panTimer) panTimer=setTimeout(()=>{panTimer=null;pushRegion(true);},200);
+});
 addEventListener('mouseup',()=>{if(!panDrag)return;panDrag=null;prev.style.cursor='grab';
-  const r=region(); api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
-    if(S.auto)render();else poll();});});
+  if(panTimer){clearTimeout(panTimer);panTimer=null;}
+  pushRegion(false);});
 boot();
 </script>"""
 
@@ -960,6 +993,19 @@ class Handler(BaseHTTPRequestHandler):
                 self.end_headers()
             else:
                 self._png(_png)
+        elif self.path.startswith("/api/map"):
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            try:
+                x0 = int(float(q.get("x0", [0])[0])); y0 = int(float(q.get("y0", [0])[0]))
+                w = int(float(q.get("w", [1200])[0])); h = int(float(q.get("h", [800])[0]))
+                tile = Image.open(MAP_PNG).convert("RGBA").crop((x0, y0, x0 + w, y0 + h))
+                if tile.size != (w, h):
+                    tile = tile.resize((w, h), Image.NEAREST)
+                buf = io.BytesIO(); tile.save(buf, "PNG")
+                self._png(buf.getvalue())
+            except Exception:
+                self.send_response(400); self.end_headers()
         elif self.path == "/api/presets":
             names = sorted(f[:-5] for f in os.listdir(PRESETS)) if os.path.isdir(PRESETS) else []
             self._json({"presets": names})
@@ -1015,6 +1061,8 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["channel"] = val
                 elif nid == "overlay":
                     STATE["overlay_map"] = bool(val)
+                elif nid == "fast":
+                    STATE["fast"] = bool(val)
                 elif nid in STATE["nodes"]:
                     if key == "all":
                         STATE["nodes"][nid].update(val)
