@@ -1124,7 +1124,9 @@ addEventListener('mouseup',()=>{ if(!curveDrag) return;
   draw(); cb(pts); });
 async function set(kind,id,k,v){
   await api('/api/set',{id,k,v}); S=await api('/api/state'); window.DESC=S.desc||{};
-  if(k==='mode'||k==='source'||k==='enabled') renderParams();
+  // anything that changes what the panel draws (a reset curve, a new mode)
+  // has to rebuild it; the curve canvas holds its own copy of the points
+  if(k==='mode'||k==='source'||k==='enabled'||k==='out_curve') renderParams();
   if(S.auto) setTimeout(poll,120); else poll();
 }
 document.getElementById('go').onclick=render;
