@@ -34,7 +34,8 @@ PORT = 3007   # override with --port
 
 _lock = threading.Lock()          # guards STATE mutation + preview bytes
 _full = None                      # whole-map land mask
-_cache = {}                       # node id -> (signature, value)
+_cache = {}
+USE_CACHE = True        # full-map builds switch this off to bound memory                       # node id -> (signature, value)
 _version = 0
 _png = None
 _render = {"running": False, "stage": 0, "total": 0, "node": "",
@@ -613,6 +614,12 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
     steps += [(f["id"], f) for f in STATE["filters"]]
     steps += [("palette", None), ("coast", None), ("output", None)]
 
+    tapped = set()
+    for m in STATE["masks"].values():
+        t = m.get("tap")
+        if t:
+            tapped.add(t)
+
     total = len(steps)
     prev_sig = "0"
     times = {}
@@ -629,7 +636,7 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
         prev_sig = chain_sig
-        cached = _cache.get(nid)
+        cached = _cache.get(nid) if USE_CACHE else None
         if cached and cached[0] == chain_sig:
             val = cached[1]
         else:
@@ -658,10 +665,12 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                     c = sorted_curve(pts)
                     if c is not None:
                         val = np.interp(val, c[0], c[1]).astype(np.float32)
-            _cache[nid] = (chain_sig, val)
+            if USE_CACHE:
+                _cache[nid] = (chain_sig, val)
         times[nid] = round((time.perf_counter() - t_node) * 1000.0, 1)
 
-        if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
+        if (isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2
+                and nid in tapped):
             ctx["fields"][nid] = val
         if nid == "distance":
             ctx["d"] = val if val is not None else ctx["d"]

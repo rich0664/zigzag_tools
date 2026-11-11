@@ -67,6 +67,7 @@ def main():
     args = ap.parse_args()
 
     apply_preset(args.preset)
+    ed.USE_CACHE = False        # one pass needs each node once
     land_full = ed.load_map()
     H, W = land_full.shape
     out_w, out_h = int(round(W * args.scale)), int(round(H * args.scale))
@@ -91,7 +92,16 @@ def main():
 
     if args.single:
         t0 = time.time()
-        ctx = ed.evaluate(region={"x0": 0, "y0": 0, "w": out_w, "h": out_h,
+        last = [t0]
+
+        def step(i, total, node):
+            now = time.time()
+            print(f"  {node:10s} {i + 1}/{total} {now - last[0]:6.1f}s "
+                  f"rss {_peak_mb():.0f} MB", flush=True)
+            last[0] = now
+
+        ctx = ed.evaluate(progress=step,
+                          region={"x0": 0, "y0": 0, "w": out_w, "h": out_h,
                                   "scale": 1.0})
         canvas = ed.channel_image(ctx, "output")
         out = args.out or os.path.join(WORK, f"full_{args.preset}.png")
