@@ -13,6 +13,7 @@ iterating on a late stage does not redo the expensive distance/erosion work.
 """
 import hashlib
 import io
+import argparse
 import json
 import os
 import time
@@ -29,7 +30,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORK = os.path.join(ROOT, "out", "sea")
 MAP_PNG = os.path.join(WORK, "map.png")
 PRESETS = os.path.join(WORK, "presets")
-PORT = 3007
+PORT = 3007   # override with --port
 
 _lock = threading.Lock()          # guards STATE mutation + preview bytes
 _render_lock = threading.Lock()   # one render at a time
@@ -59,6 +60,8 @@ def default_state():
             "features": dict(enabled=False, amp=0.12, scale=70, density=0.70,
                              octaves=4, seed=9, masks=[]),
             "erode": dict(enabled=True, window=6, layers=20, mix=1.0, masks=[]),
+            "drainage": dict(enabled=False, scale=4, steps=4, k=2.0, m=0.5,
+                             n=1.0, cap=0.15, strength=1.0, masks=[]),
             "shelf": dict(enabled=False, gain=1.0, power=1.0, masks=[]),
             "shade": dict(enabled=False, amp=1.45, lo=0.76, hi=1.24),
             "palette": dict(enabled=True),
@@ -246,10 +249,70 @@ def n_output(node, ctx, prev_sig):
     return np.clip(rgb, 0, 255).astype(np.uint8), None
 
 
+
+# --------------------------------------------------------------------------
+# stream-power drainage
+# --------------------------------------------------------------------------
+def flow_dirs(h):
+    """D8 steepest descent. Returns (receiver flat index or -1, slope)."""
+    H, W = h.shape
+    idx = np.arange(H * W, dtype=np.int64).reshape(H, W)
+    best = np.full((H, W), -1, dtype=np.int64)
+    bestdrop = np.zeros((H, W), dtype=np.float32)
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            y0, y1 = max(0, -dy), H - max(0, dy)
+            x0, x1 = max(0, -dx), W - max(0, dx)
+            nb = h[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+            ni = idx[y0 + dy:y1 + dy, x0 + dx:x1 + dx]
+            dist = 1.41421356 if (dy and dx) else 1.0
+            slope = (h[y0:y1, x0:x1] - nb) / dist
+            b = slope > bestdrop[y0:y1, x0:x1]
+            bestdrop[y0:y1, x0:x1] = np.where(b, slope, bestdrop[y0:y1, x0:x1])
+            best[y0:y1, x0:x1] = np.where(b, ni, best[y0:y1, x0:x1])
+    return best.ravel(), bestdrop
+
+
+def flow_accum(rec, order):
+    """upstream cell count, accumulated downhill (order = high to low)"""
+    acc = np.ones(rec.size, dtype=np.float32)
+    for i in order:
+        r = rec[i]
+        if r >= 0:
+            acc[r] += acc[i]
+    return acc
+
+
+def n_drainage(node, ctx, prev_sig):
+    """stream-power incision: carve where drainage area and slope are high"""
+    h = ctx["h"]
+    H, W = h.shape
+    sc_ = max(1, int(node["scale"]))
+    SW, SH = max(8, W // sc_), max(8, H // sc_)
+    cur = np.array(Image.fromarray(h, mode="F").resize((SW, SH), Image.BICUBIC))
+    dh = np.zeros((SH, SW), dtype=np.float32)
+
+    for _ in range(max(1, int(node["steps"]))):
+        rec, slope = flow_dirs(cur)
+        order = np.argsort(-cur.ravel(), kind="stable")
+        acc = flow_accum(rec, order)
+        A = (acc / max(1.0, float(acc.max()))) ** float(node["m"])
+        S = np.clip(slope.ravel() / max(1e-6, float(slope.max())), 0, 1) ** float(node["n"])
+        step = np.clip(float(node["k"]) * A * S, 0, float(node.get("cap", 0.1))).reshape(SH, SW)
+        cur = np.clip(cur - step, 0, 1)
+        dh += step
+
+    dh_up = np.array(Image.fromarray(dh, mode="F").resize((W, H), Image.BICUBIC))
+    w = mask_weight(node, ctx) * float(node.get("strength", 1.0))
+    return np.clip(h - dh_up * w, 0, 1), None
+
+
 ORDER = [
     ("distance", n_distance), ("warp", n_warp), ("height", n_height),
     ("noise", n_noise), ("features", n_features), ("erode", n_erode),
-    ("shelf", n_shelf), ("shade", n_shade), ("palette", n_palette),
+    ("drainage", n_drainage), ("shelf", n_shelf), ("shade", n_shade), ("palette", n_palette),
     ("coast", n_coast), ("output", n_output),
 ]
 
@@ -286,7 +349,7 @@ def evaluate(progress=None):
             ctx["d"] = val if val is not None else ctx["d"]
         elif nid in ("warp",):
             ctx["d"] = val if val is not None else ctx["d"]
-        elif nid in ("height", "noise", "features", "erode", "shelf", "shade"):
+        elif nid in ("height", "noise", "features", "erode", "drainage", "shelf", "shade"):
             ctx["h"] = val if val is not None else ctx["h"]
         elif nid == "palette":
             ctx["color"] = val if val is not None else np.zeros((*land.shape, 3), np.float32)
@@ -410,6 +473,7 @@ h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter
     <button id=go>render</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
     <button id=save>save preset</button><button id=load>load preset</button>
+    <button id=reset>reset</button>
   </div>
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
   <div id=prev><img id=img></div>
@@ -433,6 +497,10 @@ async function poll(){
 }
 function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
 document.getElementById('go').onclick=render;
+document.getElementById('reset').onclick=async()=>{
+  if(!confirm('reset all nodes to defaults?'))return;
+  await api('/api/reset',{}); S=await api('/api/state'); renderNodes(); renderMasks();
+  renderTop(); renderParams(); render();};
 document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
 async function init(){
   S=await api('/api/state');
@@ -568,7 +636,7 @@ class Handler(BaseHTTPRequestHandler):
                 st = {"region": STATE["region"], "channel": STATE["channel"],
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
                       "order": [n for n, _ in ORDER],
-                      "channels": ["output", "h", "d", "color", "shade"],
+                      "channels": ["output", "h", "d", "color"],
                       "last": STATE.get("last", "erode"), "auto": _render["auto"]}
             self._json(st)
         else:
@@ -579,7 +647,12 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length", 0))
         body = json.loads(self.rfile.read(n) or b"{}")
         with _lock:
-            if self.path == "/api/auto":
+            if self.path == "/api/reset":
+                STATE.clear()
+                STATE.update(default_state())
+                _cache.clear()
+                _png = None
+            elif self.path == "/api/auto":
                 _render["auto"] = bool(body.get("on"))
             elif self.path == "/api/set":
                 nid, key, val = body["id"], body["k"], body["v"]
@@ -625,8 +698,17 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global PORT
+    ap = argparse.ArgumentParser(description="sea texture editor")
+    ap.add_argument("--port", type=int, default=PORT,
+                    help="port to serve on (default 3007); use a second port to "
+                         "keep an agent's experiments off your own session")
+    ap.add_argument("--no-browser", action="store_true")
+    args = ap.parse_args()
+    PORT = args.port
     load_map()
-    threading.Timer(0.6, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
+    if not args.no_browser:
+        threading.Timer(0.6, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
     print(f"sea editor on http://127.0.0.1:{PORT}  (ctrl-c to stop)")
     srv.serve_forever()
