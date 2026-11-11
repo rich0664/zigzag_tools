@@ -141,6 +141,29 @@ DESC = {
     "mask.invert": "flip the mask",
 }
 
+STATE_PATH = os.path.join(WORK, "editor_state.json")
+
+
+def save_state():
+    try:
+        with open(STATE_PATH, "w") as f:
+            json.dump({k: STATE[k] for k in ("region", "channel", "overlay_map",
+                                             "nodes", "masks", "next_mask")}, f)
+    except Exception:
+        pass
+
+
+def load_state():
+    try:
+        with open(STATE_PATH) as f:
+            data = json.load(f)
+        for k in ("region", "channel", "overlay_map", "nodes", "masks", "next_mask"):
+            if k in data:
+                STATE[k] = data[k]
+    except Exception:
+        pass
+
+
 STATE = default_state()
 
 
@@ -719,12 +742,16 @@ async function select(id){sel=id; await api('/api/select',{id});
   renderParams(); renderNodes(); renderMasks();}
 function field(kind,id,k,v,opts){
   const lab=document.createElement('label'); lab.textContent=k;
+  const dkey=(kind==='mask')?('mask.'+k):(id+'.'+k);
+  const tip=(window.DESC||{})[dkey]
+    ||(k==='enabled'?'enabled: off = this node passes its input straight through':'');
+  lab.title=tip;
   let inp;
   if(k==='blend'){
     inp=document.createElement('select');
     inp.innerHTML=['add','multiply'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
     inp.onchange=()=>set(kind,id,k,inp.value);
-    inp.title=(window.DESC||{})[id+'.'+k]||'';
+    inp.title=lab.title;
     return [lab,inp];
   }
   if(kind==='mask'&&k==='tap'||opts&&opts.select){
@@ -741,9 +768,7 @@ function field(kind,id,k,v,opts){
     inp=document.createElement('input'); inp.type='text'; inp.value=v;
     inp.onchange=()=>set(kind,id,k,inp.value);
   }
-  const dkey = (kind==='mask') ? ('mask.'+k) : (id+'.'+k);
-  inp.title=(window.DESC||{})[dkey]
-    || (k==='enabled'?'enabled: off = this node passes its input straight through':'');
+  inp.title=lab.title;
   return [lab,inp];
 }
 function renderParams(){
@@ -774,6 +799,7 @@ function renderParams(){
     }
     if(sel==='coast'){
       const lab=document.createElement('label'); lab.textContent='tint';
+      lab.title='coastal tint colour, mixed in only where it lightens';
       const c=document.createElement('input'); c.type='color';
       c.value=hex([node.r,node.g,node.b]);
       c.title='coastal tint colour, mixed in only where it lightens';
@@ -790,6 +816,8 @@ function renderParams(){
     for(const mid of Object.keys(S.masks)){
       const l=document.createElement('label'); const cb=document.createElement('input');
       cb.type='checkbox'; cb.checked=(node.masks||[]).includes(mid);
+      l.title='wire this mask into '+sel+': the effect is multiplied by it';
+      cb.title=l.title;
       cb.onchange=()=>{const arr=new Set(node.masks||[]);
         cb.checked?arr.add(mid):arr.delete(mid); set('nodes',sel,'masks',[...arr]);};
       l.appendChild(cb); l.appendChild(document.createTextNode(mid)); wired.appendChild(l);
@@ -1016,6 +1044,8 @@ class Handler(BaseHTTPRequestHandler):
                     for nid, params in data[k].items():
                         STATE[k].setdefault(nid, {}).update(params)
                 _cache.clear()
+        if self.path != "/api/render" and self.path != "/api/select":
+            save_state()
         # outside the state lock: never hold it while rendering
         if self.path == "/api/render":
             render_async()
@@ -1034,6 +1064,7 @@ def main():
     args = ap.parse_args()
     PORT = args.port
     load_map()
+    load_state()
     if not args.no_browser:
         threading.Timer(0.6, lambda: webbrowser.open(f"http://127.0.0.1:{PORT}")).start()
     srv = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
