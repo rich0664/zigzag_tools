@@ -212,11 +212,13 @@ def sorted_curve(pts):
     p = sorted((float(a), float(b)) for a, b in pts)
     xs, ys = [], []
     for x, y in p:
-        if xs and abs(x - xs[-1]) < 1e-4:
-            ys[-1] = y
-        else:
-            xs.append(x)
-            ys.append(y)
+        x = min(1.0, max(0.0, x))
+        if xs and x <= xs[-1]:
+            x = xs[-1] + 1e-3      # keep every point; nudge instead of dropping
+            if x > 1.0:
+                continue
+        xs.append(x)
+        ys.append(y)
     if len(xs) < 2:
         return None
     return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
@@ -884,6 +886,10 @@ function renderParams(){
     if(filt.out_curve){
       const w=document.getElementById('curvewrap');
       const h=document.createElement('h3'); h.textContent='output curve';
+      const rs=document.createElement('button'); rs.textContent='reset';
+      rs.title='reset this curve to identity';
+      rs.onclick=()=>set('filters',sel,'out_curve',[[0,0],[1,1]]);
+      h.appendChild(document.createTextNode(' ')); h.appendChild(rs);
       w.appendChild(h);
       w.appendChild(curveUI(filt.out_curve, pts=>set('filters',sel,'out_curve',pts)));
     }
@@ -918,6 +924,10 @@ function renderParams(){
     if(node.out_curve){
       const w=document.getElementById('curvewrap');
       const h=document.createElement('h3'); h.textContent='output curve';
+      const rs=document.createElement('button'); rs.textContent='reset';
+      rs.title='reset this curve to identity';
+      rs.onclick=()=>set('nodes',sel,'out_curve',[[0,0],[1,1]]);
+      h.appendChild(document.createTextNode(' ')); h.appendChild(rs);
       w.appendChild(h); w.appendChild(curveUI(node.out_curve,
         pts=>set('nodes',sel,'out_curve',pts)));
     }
@@ -997,7 +1007,9 @@ function curveUI(pts, cb){
   addEventListener('mousemove',e=>{ if(curveDrag<0)return; const [x,y]=pos(e);
     pts[curveDrag]=[Math.max(0,Math.min(1,x)),Math.max(0,Math.min(1,y))]; draw(); });
   addEventListener('mouseup',()=>{ if(curveDrag>=0){curveDrag=-1;
-    pts.sort((a,b)=>a[0]-b[0]); draw(); cb(pts);} });
+    pts.sort((a,b)=>a[0]-b[0]);
+    for(let i=1;i<pts.length;i++) if(pts[i][0]<=pts[i-1][0]) pts[i][0]=Math.min(1,pts[i-1][0]+0.01);
+    draw(); cb(pts);} });
   draw(); return c;
 }
 async function set(kind,id,k,v){
