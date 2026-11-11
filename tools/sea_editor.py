@@ -780,7 +780,7 @@ canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-to
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
   <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div></div>
 <script>
-let S=null, sel=null, lastStamp=-1, curveDrag=-1, panDrag=null;
+let S=null, sel=null, lastStamp=-1, curveDrag=null, panDrag=null;
 async function api(path, body){const r=await fetch(path,{method:body?'POST':'GET',
   headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
   return r.headers.get('content-type')?.includes('json')?r.json():r.text();}
@@ -1074,21 +1074,28 @@ function curveUI(pts, cb){
     return [(e.clientX-r.left)/size,1-(e.clientY-r.top)/size];};
   c.onmousedown=e=>{ if(e.button!==0) return; const [x,y]=pos(e);
     let best=-1,bd=1e9; pts.forEach((p,i)=>{const d=(p[0]-x)**2+(p[1]-y)**2; if(d<bd){bd=d;best=i;}});
-    if(bd<0.02){curveDrag=best;} else {pts.push([x,y]);curveDrag=pts.length-1;}
+    const i=(bd<0.02)?best:(pts.push([x,y])-1);
+    // one shared drag record: the window handlers below were previously added
+    // per canvas and never removed, so every curve ever drawn received the drag
+    curveDrag={pts,cb,canvas:c,draw,i};
     draw(); };
   c.oncontextmenu=e=>{e.preventDefault(); const [x,y]=pos(e);
     let best=-1,bd=1e9; pts.forEach((p,i)=>{const d=(p[0]-x)**2+(p[1]-y)**2; if(d<bd){bd=d;best=i;}});
     if(bd<0.02&&pts.length>2){pts.splice(best,1);draw();cb(pts);}};
-  addEventListener('mousemove',e=>{ if(curveDrag<0)return; const [x,y]=pos(e);
-    pts[curveDrag]=[Math.max(0,Math.min(1,x)),Math.max(0,Math.min(1,y))]; draw(); });
-  addEventListener('mouseup',()=>{ if(curveDrag>=0){curveDrag=-1;
-    pts.sort((a,b)=>a[0]-b[0]);
-    const g=Math.min(0.01,0.9/(pts.length-1));
-    for(let i=1;i<pts.length;i++) pts[i][0]=Math.max(pts[i][0],pts[i-1][0]+g);
-    for(let i=pts.length-1;i>=0;i--) pts[i][0]=Math.min(pts[i][0],1-(pts.length-1-i)*g);
-    draw(); cb(pts);} });
   draw(); return c;
 }
+addEventListener('mousemove',e=>{ if(!curveDrag) return;
+  const {pts,canvas,draw,i}=curveDrag; const r=canvas.getBoundingClientRect();
+  if(!r.width) return;
+  const x=(e.clientX-r.left)/r.width, y=1-(e.clientY-r.top)/r.height;
+  pts[i]=[Math.max(0,Math.min(1,x)),Math.max(0,Math.min(1,y))]; draw(); });
+addEventListener('mouseup',()=>{ if(!curveDrag) return;
+  const {pts,cb,draw}=curveDrag; curveDrag=null;
+  pts.sort((a,b)=>a[0]-b[0]);
+  const g=Math.min(0.01,0.9/(pts.length-1));
+  for(let i=1;i<pts.length;i++) pts[i][0]=Math.max(pts[i][0],pts[i-1][0]+g);
+  for(let i=pts.length-1;i>=0;i--) pts[i][0]=Math.min(pts[i][0],1-(pts.length-1-i)*g);
+  draw(); cb(pts); });
 async function set(kind,id,k,v){
   await api('/api/set',{id,k,v}); S=await api('/api/state'); window.DESC=S.desc||{};
   if(S.auto) setTimeout(poll,120); else poll();
