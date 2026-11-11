@@ -911,8 +911,8 @@ font:12px/1.4 ui-monospace,monospace;display:flex;height:100vh;overflow:hidden}
 #top select{width:auto}
 #prev{flex:1;overflow:hidden;position:relative;cursor:grab;display:flex;
 align-items:center;justify-content:center;background:#0a1016}
-#prev img{position:absolute;inset:0;margin:auto;image-rendering:pixelated;
-max-width:100%;max-height:100%;pointer-events:none;user-select:none;-webkit-user-drag:none}
+#prev img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
+image-rendering:pixelated;pointer-events:none;user-select:none;-webkit-user-drag:none}
 #mapov{opacity:1;transition:none}
 #prev{user-select:none}
 .node{padding:2px 5px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
@@ -943,6 +943,8 @@ input.off,select.off{opacity:.38}
   <div id=top>
     x<input id=rx type=number size=5> y<input id=ry type=number size=5>
     w<input id=rw type=number size=5> h<input id=rh type=number size=5>
+    <button id=zin title="zoom in: halve the crop, centred">+</button>
+    <button id=zout title="zoom out: double the crop, centred">&minus;</button>
     <select id=scale><option value=1>1 px/tile<option value=0.5>0.5 px/tile</select>
     <select id=chan></select>
     <button id=go>render</button>
@@ -1385,7 +1387,21 @@ function commitRegion(){
   api('/api/set',{id:'region',k:'all',v:region()}).then(async()=>{
     S=await api('/api/state'); applyRegion(S.region); render();});
 }
+function zoomBy(f){
+  const r=region(), MW=S.map.w, MH=S.map.h;
+  let w=Math.max(64, Math.min(MW, Math.round(r.w*f)));
+  let h=Math.max(48, Math.min(MH, Math.round(r.h*f)));
+  const cap=4000000;                     // same ceiling the server enforces
+  const px=w*h*(+scale.value)**2;
+  if(px>cap){ const k=Math.sqrt(cap/px); w=Math.floor(w*k); h=Math.floor(h*k); }
+  const x0=Math.round(r.x0+(r.w-w)/2), y0=Math.round(r.y0+(r.h-h)/2);
+  applyRegion({x0:Math.max(0,Math.min(MW-w,x0)), y0:Math.max(0,Math.min(MH-h,y0)),
+               w, h, scale:r.scale});
+  commitRegion();
+}
 for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=commitRegion;
+document.getElementById('zin').onclick=()=>zoomBy(0.5);
+document.getElementById('zout').onclick=()=>zoomBy(2);
 document.getElementById('scale').onchange=commitRegion;
 document.getElementById('chan').onchange=()=>{const v=chan.value;
   api('/api/set',{id:'channel',k:'all',v}).then(()=>{S.channel=v;render();});};
@@ -1477,6 +1493,8 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 taps = ["base"] + [f["id"] for f in STATE["filters"]]
                 st = {"region": STATE["region"], "channel": STATE["channel"],
+                      "map": {"w": int(load_map().shape[1]),
+                              "h": int(load_map().shape[0])},
                       "overlay_map": bool(STATE["nodes"]["output"].get("overlay_map")),
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
                       "filters": STATE["filters"], "filter_defs": FILTER_DEFS,
