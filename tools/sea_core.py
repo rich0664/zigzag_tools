@@ -72,23 +72,23 @@ CFG = dict(
     shade_clip=(0.76, 1.24),
 
     # ---- colour ---------------------------------------------------------
-    land_t=0.58,             # tone under the land (covered by tiles in game)
-    land_band=1,             # tiles of coast tone pushed INTO the land fill, so
+    land_t=None,             # tone under the land (covered by tiles in game)
+    land_band=0,             # tiles of coast tone pushed INTO the land fill, so
                              # the tiles' seam never shows a dark ring
     land_band_t=None,        # None = use shore_base
     rim_levels=4,            # coast pass width in pixels (dilated from the mask)
     rim_min=2.0,             # coast pass range, tiles
     rim_max=5.0,
     rim_noise_scale=1200,
-    rim_strength=0.13,       # additive strength at the very coast
+    rim_strength=0.06,       # additive strength at the very coast
     rim_rgb=(95.0, 155.0, 195.0),
 )
 
 PALETTE_STOPS = np.array([0.00, 0.03, 0.07, 0.12, 0.20, 0.32, 0.46, 0.66, 1.00],
                          dtype=np.float32)
 PALETTE_COLS = np.array([
-    [26, 54, 73], [25, 50, 69], [23, 47, 65], [20, 42, 59], [18, 38, 53],
-    [16, 34, 49], [14, 29, 42], [11, 22, 33], [7, 13, 18],
+    [74, 126, 156], [58, 104, 134], [45, 86, 116], [35, 70, 98], [28, 57, 82],
+    [22, 46, 67], [17, 36, 53], [12, 25, 37], [7, 13, 18],
 ], dtype=np.float32)
 
 
@@ -324,4 +324,49 @@ def render(land, d, cfg=CFG):
     rim = np.clip(1.0 - (band - 1.0) / max(1.0, levels - 1.0), 0.0, 1.0)
     rgb = rgb + np.array(cfg["rim_rgb"]) * (cfg["rim_strength"] * rim[:, :, None])
 
+    return np.clip(rgb, 0, 255).astype(np.uint8)
+
+
+# ---------------------------------------------------------------------------
+# Minimal variant: height = distance from land, then erosion. No pool, no
+# masks, no coast pass. Start here when tuning; the full pipeline is above.
+CFG_SIMPLE = dict(
+    deep_dist=1600.0,        # tiles from land where the floor reaches its lowest
+    curve=1.0,              # >1 keeps shallows wide, <1 drops off sooner
+    noise_amp=0.15,         # a little variation so the erosion has something to work on
+    noise_scale=350,
+    noise_octaves=4,
+    noise_seed=11,
+    relief_down=2,          # erosion resolution (tiles per pixel)
+    erosion_window=5,       # in tiles
+    erosion_layers=20,
+    erosion_mix=1.0,        # 0 = raw distance height, 1 = fully eroded
+    land_t=None,            # None = land keeps the top height (brightest)
+)
+
+
+def render_simple(land, d, cfg=CFG_SIMPLE):
+    H, W = land.shape
+    p = 1.0 / cfg["relief_down"]
+
+    h = np.clip(1.0 - d / cfg["deep_dist"], 0.0, 1.0) ** cfg["curve"]
+    if cfg["noise_amp"]:
+        n = fbm(W, H, cfg["noise_scale"], cfg["noise_octaves"], seed=cfg["noise_seed"]) - 0.5
+        h = np.clip(h * (1.0 + 2.0 * cfg["noise_amp"] * n), 0.0, 1.0)
+
+    if cfg["erosion_mix"] > 0:
+        SW, SH = max(8, int(W * p)), max(8, int(H * p))
+        hs = np.array(Image.fromarray(h.astype(np.float32), mode="F").resize((SW, SH), Image.BICUBIC))
+        he = slab_erode(hs, window=max(2, int(round(cfg["erosion_window"] * p))),
+                        layers=cfg["erosion_layers"])
+        he = upscale(he, (W, H))
+        h = h * (1.0 - cfg["erosion_mix"]) + he * cfg["erosion_mix"]
+        del hs, he
+
+    t = 1.0 - np.clip(h, 0.0, 1.0)
+    if cfg["land_t"] is not None:
+        t = np.where(land, cfg["land_t"], t)
+    t = np.clip(t, 0, 1)
+
+    rgb = np.stack([np.interp(t, PALETTE_STOPS, PALETTE_COLS[:, i]) for i in range(3)], axis=-1)
     return np.clip(rgb, 0, 255).astype(np.uint8)

@@ -36,7 +36,7 @@ print("rendering…")
 d = np.load(DIST_NPY)
 if d.shape != (H, W):
     d = sea_core.upscale(d, (W, H))
-rgb = sea_core.render(land, d)
+rgb = sea_core.render_simple(land, d)
 
 out_png = os.path.join(WORK, "sea64.png")
 Image.fromarray(rgb, "RGB").save(out_png)

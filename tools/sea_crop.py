@@ -39,6 +39,6 @@ land = sub[M:M + (Y1 - Y0), M:M + (X1 - X0)]
 del d_sub, sub, pad, full
 
 print("rendering…")
-rgb = sea_core.render(land, d)
+rgb = sea_core.render_simple(land, d)
 Image.fromarray(rgb, "RGB").save(os.path.join(WORK, "v2_crop.png"))
 print("wrote out/sea/v2_crop.png", rgb.shape[1], "x", rgb.shape[0])
