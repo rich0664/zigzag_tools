@@ -54,23 +54,9 @@ def default_state():
         "fast": False,
         "nodes": {
             "distance": dict(enabled=True, down=2),
-            "warp": dict(enabled=False, tiles=46.0, scale=700),
             "height": dict(enabled=True, mode="profile", deep_dist=1600.0,
                            curve=1.0, shelf_t=0.10, slope_t=0.32, abyss_t=1.0,
                            out_curve=[[0, 0], [1, 1]]),
-            "noise": dict(enabled=False, amp=0.15, scale=350, octaves=4, seed=11,
-                          blend="add", masks=[], out_curve=[[0, 0], [1, 1]]),
-            "features": dict(enabled=False, amp=0.12, scale=70, density=0.70,
-                             octaves=4, seed=9, masks=[],
-                             out_curve=[[0, 0], [1, 1]]),
-            "erode": dict(enabled=True, window=6, layers=20, mix=1.0, masks=[],
-                          out_curve=[[0, 0], [1, 1]]),
-            "drainage": dict(enabled=False, scale=4, steps=4, k=2.0, m=0.5,
-                             n=1.0, cap=0.15, strength=1.0, masks=[],
-                             out_curve=[[0, 0], [1, 1]]),
-            "shelf": dict(enabled=False, gain=1.0, power=1.0, masks=[],
-                          out_curve=[[0, 0], [1, 1]]),
-            "shade": dict(enabled=False, amp=1.45, lo=0.76, hi=1.24),
             "palette": dict(enabled=True,
                             stops=[0.0, 0.03, 0.07, 0.12, 0.20, 0.32, 0.46, 0.66, 1.0],
                             cols=[[74, 126, 156], [58, 104, 134], [45, 86, 116],
@@ -78,8 +64,14 @@ def default_state():
                                   [17, 36, 53], [12, 25, 37], [7, 13, 18]]),
             "coast": dict(enabled=False, levels=4, strength=0.13,
                           r=95, g=155, b=195),
-            "output": dict(enabled=True, land_t=0.58),
+            "output": dict(enabled=True, land_t=0.58, overlay_map=False),
         },
+        "filters": [
+            dict(id="f1", type="erode", enabled=True, masks=[],
+                 out_curve=[[0, 0], [1, 1]],
+                 **FILTER_DEFS["erode"]),
+        ],
+        "next_filter": 2,
         "masks": {
             "depth_band": dict(source="height", tap="", scale=400, lo=0.15, hi=0.70,
                                feather=0.1, invert=False),
@@ -88,10 +80,41 @@ def default_state():
             "big_noise": dict(source="noise", tap="", scale=900, lo=0.3, hi=0.7,
                               feather=1.0, invert=False),
         },
-        "next_mask": 1,
     }
 
 
+STATE_PATH = os.path.join(WORK, "editor_state.json")
+
+
+def save_state():
+    try:
+        with open(STATE_PATH, "w") as f:
+            json.dump({k: STATE[k] for k in ("region", "channel", "overlay_map",
+                                             "nodes", "masks", "next_mask")}, f)
+    except Exception:
+        pass
+
+
+def load_state():
+    try:
+        with open(STATE_PATH) as f:
+            data = json.load(f)
+        for k in ("region", "channel", "overlay_map", "nodes", "masks", "next_mask"):
+            if k in data:
+                STATE[k] = data[k]
+    except Exception:
+        pass
+
+
+FILTER_DEFS = {
+    "warp": dict(tiles=20.0, scale=700, seed=34),
+    "noise": dict(amp=0.15, scale=350, octaves=4, seed=11),
+    "blur": dict(radius=2),
+    "features": dict(amp=0.12, scale=70, density=0.70, octaves=4, seed=9),
+    "erode": dict(window=6, layers=20, mix=1.0),
+    "drainage": dict(scale=4, steps=4, k=2.0, m=0.5, n=1.0, cap=0.15, strength=1.0),
+    "shelf": dict(gain=1.0, power=1.0),
+}
 
 DESC = {
     "distance.down": "distance-field resolution: 1 = one pixel per tile, 2 = two tiles per pixel (cheaper)",
@@ -141,29 +164,6 @@ DESC = {
     "mask.feather": "softness of the edge (unused in the current mapping)",
     "mask.invert": "flip the mask",
 }
-
-STATE_PATH = os.path.join(WORK, "editor_state.json")
-
-
-def save_state():
-    try:
-        with open(STATE_PATH, "w") as f:
-            json.dump({k: STATE[k] for k in ("region", "channel", "overlay_map",
-                                             "nodes", "masks", "next_mask")}, f)
-    except Exception:
-        pass
-
-
-def load_state():
-    try:
-        with open(STATE_PATH) as f:
-            data = json.load(f)
-        for k in ("region", "channel", "overlay_map", "nodes", "masks", "next_mask"):
-            if k in data:
-                STATE[k] = data[k]
-    except Exception:
-        pass
-
 
 STATE = default_state()
 
@@ -437,6 +437,40 @@ def n_drainage(node, ctx, prev_sig):
     return np.clip(h + c, 0, 1), c
 
 
+
+def f_warp(h, node, ctx):
+    H, W = h.shape
+    sc_t = float(node["scale"])
+    w1 = (sc.fbm(W, H, sc_t, 3, seed=int(node["seed"])) - 0.5) * float(node["tiles"])
+    w2 = (sc.fbm(W, H, sc_t, 3, seed=int(node["seed"]) + 1) - 0.5) * float(node["tiles"])
+    yi, xi = np.mgrid[0:H, 0:W]
+    out = h[np.clip((yi + w1).astype(np.int32), 0, H - 1),
+            np.clip((xi + w2).astype(np.int32), 0, W - 1)]
+    return out.astype(np.float32), None
+
+
+def f_blur(h, node, ctx):
+    return sc.box_blur(h, max(1, int(round(float(node["radius"])))), 2), None
+
+
+def _as_filter(fn):
+    def run(h, node, ctx):
+        c2 = dict(ctx)
+        c2["h"] = h
+        return fn(node, c2, "")
+    return run
+
+
+FILTER_FN = {
+    "warp": f_warp,
+    "noise": _as_filter(n_noise),
+    "blur": f_blur,
+    "features": _as_filter(n_features),
+    "erode": _as_filter(n_erode),
+    "drainage": _as_filter(n_drainage),
+    "shelf": _as_filter(n_shelf),
+}
+
 SCALAR_NODES = {"height", "noise", "features", "erode", "drainage", "shelf"}
 
 # what each node consumes and produces, shown in the node list
@@ -455,72 +489,73 @@ NODE_IO = {
     "output": ("colour", "image"),
 }
 
-ORDER = [
-    ("distance", n_distance), ("warp", n_warp), ("height", n_height),
-    ("noise", n_noise), ("features", n_features), ("erode", n_erode),
-    ("drainage", n_drainage), ("shelf", n_shelf), ("shade", n_shade), ("palette", n_palette),
-    ("coast", n_coast), ("output", n_output),
-]
 
 
 def evaluate(progress=None, stop_at=None, region=None):
-    """run the chain, reusing cache entries whose signature still matches"""
     global _cache
     region = region or STATE["region"]
     land, d = load_region(region)
-    ctx = {"land": land, "d": d, "h": None, "color": None}
-    chain_sig = "0"
-    new_cache = {}
+    ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {}}
+    steps = [("distance", None), ("height", None)]
+    steps += [(f["id"], f) for f in STATE["filters"]]
+    steps += [("palette", None), ("coast", None), ("output", None)]
 
-    total = len(ORDER)
-    for i, (nid, fn) in enumerate(ORDER):
+    total = len(steps)
+    for i, (nid, filt) in enumerate(steps):
         if progress:
             progress(i, total, nid)
-        _render["node"] = nid
-        node = STATE["nodes"][nid]
-        chain_sig = sig(chain_sig, nid, node, [STATE["masks"][m] for m in node.get("masks", [])],
+        node = filt if filt is not None else STATE["nodes"][nid]
+
+        chain_sig = sig(nid, node, [STATE["masks"][m] for m in node.get("masks", [])],
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
         cached = _cache.get(nid)
         if cached and cached[0] == chain_sig:
             val = cached[1]
         else:
-            if not node.get("enabled", True):
-                val = None
-            else:
-                prev_h = ctx.get("h")
-                val, contrib = fn(node, ctx, chain_sig)
+            val, contrib = None, None
+            if node.get("enabled", True):
+                if nid == "distance":
+                    val = d
+                elif nid == "height":
+                    val, contrib = n_height(node, ctx, chain_sig)
+                elif nid in FILTER_FN and filt is not None:
+                    val, contrib = FILTER_FN[filt["type"]](ctx["h"], node, ctx)
+                elif nid == "palette":
+                    val, contrib = n_palette(node, ctx, chain_sig)
+                elif nid == "coast":
+                    val, contrib = n_coast(node, ctx, chain_sig)
+                elif nid == "output":
+                    val, contrib = n_output(node, ctx, chain_sig)
                 pts = node.get("out_curve")
-                if (isinstance(val, np.ndarray) and nid in SCALAR_NODES
-                        and pts and len(pts) >= 2):
-                    if contrib is not None and prev_h is not None:
-                        val = np.clip(prev_h + apply_curve(contrib, pts), 0, 1)
+                if (isinstance(val, np.ndarray) and pts and len(pts) >= 2
+                        and (nid in ("height",) or filt is not None)):
+                    if contrib is not None and ctx.get("h") is not None:
+                        val = np.clip(ctx["h"] + apply_curve(contrib, pts), 0, 1)
                     else:
                         xs = [float(p[0]) for p in pts]
                         ys = [float(p[1]) for p in pts]
                         val = np.interp(val, xs, ys).astype(np.float32)
             _cache[nid] = (chain_sig, val)
-        new_cache[nid] = (chain_sig, val)
 
-        ctx.setdefault("fields", {})
-        if isinstance(val, np.ndarray) and val.ndim == 2:
+        if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
             ctx["fields"][nid] = val
-        if stop_at and nid == stop_at:
-            break
         if nid == "distance":
             ctx["d"] = val if val is not None else ctx["d"]
-        elif nid in ("warp",):
-            ctx["d"] = val if val is not None else ctx["d"]
-        elif nid in ("height", "noise", "features", "erode", "drainage", "shelf", "shade"):
-            ctx["h"] = val if val is not None else ctx["h"]
+        elif nid == "height" or filt is not None:
+            if val is not None:
+                ctx["h"] = val
         elif nid == "palette":
             ctx["color"] = val if val is not None else np.zeros((*land.shape, 3), np.float32)
         elif nid == "coast":
-            ctx["color"] = val if val is not None else ctx["color"]
+            if val is not None:
+                ctx["color"] = val
         elif nid == "output":
             ctx["out"] = val
 
-    _cache = new_cache
+        if stop_at and nid == stop_at:
+            break
+
     return ctx
 
 
@@ -560,7 +595,7 @@ def render_now(auto=False):
     if _render["running"]:
         return False
     with _render_lock:
-        _render.update(running=True, stage=0, total=len(ORDER), node="start",
+        _render.update(running=True, stage=0, total=2 + len(STATE["filters"]) + 3, node="start",
                        started=time.time(), elapsed=0.0, error=None)
         t0 = time.time()
         try:
@@ -650,6 +685,9 @@ canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-to
 .small{color:#7d93a6}
 </style>
 <div id=left><h3>pipeline</h3><div id=nodes></div>
+  <h3>filters <select id=ftype style="width:auto"></select>
+    <button id=addfilter style="padding:1px 6px">+</button></h3>
+  <div id=filters></div>
   <h3>masks <button id=addmask style="padding:1px 6px">+</button></h3><div id=masks></div></div>
 <div id=mid>
   <div id=top>
@@ -659,7 +697,6 @@ canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-to
     <select id=chan></select>
     <button id=go>render</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
-    <label style="display:inline;color:var(--t)"><input id=mapover type=checkbox> map</label>
     <select id=presets style="width:auto;min-width:90px"></select>
     <button id=load>load</button><button id=save>save</button><button id=reset>reset</button>
   </div>
@@ -684,7 +721,9 @@ async function poll(){
     const im=document.getElementById('img');
     im.src='/api/preview?t='+s.stamp;
     im.style.transform='none';
-    syncMap();}
+    syncMap();
+  const ft=document.getElementById('ftype');
+  if(ft) ft.innerHTML=Object.keys(S.filter_defs||{}).map(t=>`<option>${t}</option>`).join('');}
   if(s.running)setTimeout(poll,300);
 }
 function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
@@ -693,41 +732,56 @@ function mapUrl(r){
 }
 function syncMap(){
   const mo=document.getElementById('mapov');
-  const on=!!S.overlay_map;
+  const on=!!(S.nodes.output&&S.nodes.output.overlay_map);
   mo.style.display=on?'block':'none';
   if(on) mo.src=mapUrl(region());
 }
 async function boot(){
   S=await api('/api/state'); window.DESC=S.desc||{};
   document.getElementById('auto').checked=!!S.auto;
-  document.getElementById('mapover').checked=!!S.overlay_map;
   syncMap();
   rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
   scale.value=String(S.region.scale);
-  renderTop(); renderNodes(); renderMasks(); select(S.last||'erode');
-  loadPresets(); render();
+  renderTop(); renderNodes(); renderMasks();
+  loadPresets();
+  const known=(S.filters||[]).some(f=>f.id===S.last)||S.nodes[S.last];
+  select(known?S.last:((S.filters&&S.filters[0])?S.filters[0].id:'height'));
+  render();
 }
 function renderTop(){
   chan.innerHTML=S.channels.map(c=>`<option ${c===S.channel?'selected':''}>${c}</option>`).join('');
 }
+function ioLabel(d,id,inp,out,title){
+  const sp=document.createElement('span'); sp.className='io'; sp.textContent=inp+' → '+out;
+  sp.title=title||''; d.appendChild(sp);
+}
 function renderNodes(){
   const el=document.getElementById('nodes'); el.innerHTML='';
-  for(const id of S.order){
+  for(const id of ['distance','height','palette','coast','output']){
     const n=S.nodes[id]; if(!n) continue;
     const d=document.createElement('div'); d.className='node'+(sel===id?' sel':'');
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=n.enabled;
     cb.onclick=e=>{e.stopPropagation(); set('nodes',id,'enabled',cb.checked);};
     d.appendChild(cb); d.appendChild(document.createTextNode(id));
-    const io=S.io&&S.io[id];
-    if(io){
-      const sp=document.createElement('span'); sp.className='io';
-      sp.textContent=io[0]+' → '+io[1];
-      sp.title=id+' takes '+io[0]+' and outputs '+io[1]+
-        ((n.masks!==undefined)?' (accepts mask nodes)':'');
-      d.appendChild(sp);
-    }
+    const io=S.io&&S.io[id]; if(io) ioLabel(d,id,io[0],io[1],id+' takes '+io[0]+' and outputs '+io[1]);
     d.onclick=()=>select(id); el.appendChild(d);
   }
+  const fe=document.getElementById('filters'); fe.innerHTML='';
+  S.filters.forEach((f,i)=>{
+    const d=document.createElement('div'); d.className='node'+(sel===f.id?' sel':'');
+    const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=f.enabled;
+    cb.onclick=e=>{e.stopPropagation(); set('filters',f.id,'enabled',cb.checked);};
+    d.appendChild(cb); d.appendChild(document.createTextNode(f.type));
+    ioLabel(d,f.id,'height','height','filter #'+f.id+' ('+f.type+')');
+    const up=document.createElement('span'); up.className='x'; up.textContent='↑';
+    up.onclick=e=>{e.stopPropagation(); api('/api/filter/move',{id:f.id,dir:'up'}).then(reload);};
+    const dn=document.createElement('span'); dn.className='x'; dn.textContent='↓';
+    dn.onclick=e=>{e.stopPropagation(); api('/api/filter/move',{id:f.id,dir:'down'}).then(reload);};
+    const x=document.createElement('span'); x.className='x'; x.textContent='×';
+    x.onclick=e=>{e.stopPropagation(); api('/api/filter/del',{id:f.id}).then(reload);};
+    d.append(up,dn,x);
+    d.onclick=()=>select(f.id); fe.appendChild(d);
+  });
 }
 function renderMasks(){
   const el=document.getElementById('masks'); el.innerHTML='';
@@ -756,7 +810,7 @@ async function select(id){sel=id; await api('/api/select',{id});
   renderParams(); renderNodes(); renderMasks();}
 function field(kind,id,k,v,opts){
   const lab=document.createElement('label'); lab.textContent=k;
-  const dkey=(kind==='mask')?('mask.'+k):(id+'.'+k);
+  const dkey=(kind==='mask')?('mask.'+k):(kind==='filter'?(id+'.'+k):(id+'.'+k));
   const tip=(window.DESC||{})[dkey]
     ||(k==='enabled'?'enabled: off = this node passes its input straight through':'');
   lab.title=tip;
@@ -789,6 +843,7 @@ function renderParams(){
   const el=document.getElementById('params'); el.innerHTML='';
   document.getElementById('curvewrap').innerHTML='';
   const node=S.nodes[sel], mask=S.masks[sel];
+  const filt=(S.filters||[]).find(f=>f.id===sel);
   if(mask){
     const KEYS=['source','tap','scale','lo','hi','feather','invert'];
     for(const [k,v] of Object.entries(mask)){
@@ -802,12 +857,33 @@ function renderParams(){
         el.append(...field('mask',sel,k,v));
       }
     }
+  } else if(filt){
+    for(const [k,v] of Object.entries(filt)){
+      if(['id','type','enabled','masks','out_curve'].includes(k)) continue;
+      el.append(...field('filter',filt.type,k,v));
+    }
+    if(filt.out_curve){
+      const w=document.getElementById('curvewrap');
+      const h=document.createElement('h3'); h.textContent='output curve';
+      w.appendChild(h);
+      w.appendChild(curveUI(filt.out_curve, pts=>set('filters',sel,'out_curve',pts)));
+    }
+    const wired=document.getElementById('wired'); wired.innerHTML='';
+    for(const mid of Object.keys(S.masks)){
+      const l=document.createElement('label'); const cb=document.createElement('input');
+      cb.type='checkbox'; cb.checked=(filt.masks||[]).includes(mid);
+      l.title='wire this mask into the filter: its contribution is multiplied by it';
+      cb.title=l.title;
+      cb.onchange=()=>{const arr=new Set(filt.masks||[]);
+        cb.checked?arr.add(mid):arr.delete(mid); set('filters',sel,'masks',[...arr]);};
+      l.appendChild(cb); l.appendChild(document.createTextNode(mid)); wired.appendChild(l);
+    }
   } else if(sel==='palette' && node){
     paletteEditor(node);
     return;
   } else if(node){
     for(const [k,v] of Object.entries(node)){
-      if(k==='masks'||k==='out_curve') continue;
+      if(k==='masks'||k==='out_curve'||k==='enabled') continue;
       if(sel==='coast'&&['r','g','b'].includes(k)) continue;
       el.append(...field('nodes',sel,k,v));
     }
@@ -911,9 +987,8 @@ async function set(kind,id,k,v){
 document.getElementById('go').onclick=render;
 document.getElementById('addmask').onclick=()=>api('/api/mask/add',{}).then(reload);
 document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
-document.getElementById('mapover').onchange=e=>{
-  api('/api/set',{id:'overlay',k:'all',v:e.target.checked}).then(()=>{
-    S.overlay_map=e.target.checked; syncMap();});};
+document.getElementById('addfilter').onclick=()=>{
+  api('/api/filter/add',{type:document.getElementById('ftype').value}).then(reload);};
 document.getElementById('reset').onclick=async()=>{ if(!confirm('reset to defaults?'))return;
   await api('/api/reset',{}); await boot(); };
 const presets=document.getElementById('presets');
@@ -949,7 +1024,7 @@ addEventListener('mousemove',e=>{if(!panDrag)return;
   ry.value=+ry.value-Math.round(dy/S.region.scale);
   // nudge what we have immediately, then render the strip we are moving to
   const mo=document.getElementById('mapov');
-  if(S.overlay_map) mo.src=mapUrl(region());   // cheap: it is just a crop
+  if(S.nodes.output&&S.nodes.output.overlay_map) mo.src=mapUrl(region());   // cheap: it is just a crop
   // the sea is intentionally left stale until release
 });
 addEventListener('mouseup',()=>{if(!panDrag)return;panDrag=null;prev.style.cursor='grab';
@@ -1015,12 +1090,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json(data)
         elif self.path == "/api/state":
             with _lock:
+                taps = ["base"] + [f["id"] for f in STATE["filters"]]
                 st = {"region": STATE["region"], "channel": STATE["channel"],
-                      "overlay_map": bool(STATE.get("overlay_map")),
+                      "overlay_map": bool(STATE["nodes"]["output"].get("overlay_map")),
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
-                      "order": [n for n, _ in ORDER],
+                      "filters": STATE["filters"], "filter_defs": FILTER_DEFS,
+                      "order": ["distance", "height"] + [f["id"] for f in STATE["filters"]]
+                               + ["palette", "coast", "output"],
                       "channels": ["output", "h", "d", "color"] + list(STATE["masks"].keys()),
-                      "taps": [n for n, _ in ORDER if n in SCALAR_NODES],
+                      "taps": taps,
                       "desc": DESC, "io": NODE_IO,
                       "last": STATE.get("last", "erode"), "auto": _render["auto"]}
             self._json(st)
@@ -1032,7 +1110,22 @@ class Handler(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length", 0))
         body = json.loads(self.rfile.read(n) or b"{}")
         with _lock:
-            if self.path == "/api/mask/add":
+            if self.path == "/api/filter/add":
+                n = STATE.get("next_filter", 1)
+                typ = body.get("type", "noise")
+                STATE["filters"].append(dict(id=f"f{n}", type=typ, enabled=True,
+                                             masks=[], out_curve=[[0, 0], [1, 1]],
+                                             **FILTER_DEFS[typ]))
+                STATE["next_filter"] = n + 1
+            elif self.path == "/api/filter/del":
+                STATE["filters"] = [f for f in STATE["filters"] if f["id"] != body.get("id")]
+            elif self.path == "/api/filter/move":
+                ids = [f["id"] for f in STATE["filters"]]
+                i = ids.index(body.get("id"))
+                j = i + (1 if body.get("dir") == "down" else -1)
+                if 0 <= j < len(ids):
+                    STATE["filters"][i], STATE["filters"][j] = STATE["filters"][j], STATE["filters"][i]
+            elif self.path == "/api/mask/add":
                 n = STATE.get("next_mask", 1)
                 State_mid = f"mask_{n}"
                 STATE["next_mask"] = n + 1
@@ -1067,6 +1160,12 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["nodes"][nid].update(val)
                     else:
                         STATE["nodes"][nid][key] = val
+                elif any(f["id"] == nid for f in STATE["filters"]):
+                    f = next(x for x in STATE["filters"] if x["id"] == nid)
+                    if key == "all":
+                        f.update(val)
+                    else:
+                        f[key] = val
                 elif nid in STATE["masks"]:
                     if key == "all":
                         STATE["masks"][nid].update(val)
@@ -1081,15 +1180,20 @@ class Handler(BaseHTTPRequestHandler):
                 path = os.path.join(PRESETS, body["name"] + ".json")
                 with open(path, "w") as f:
                     json.dump({"region": STATE["region"], "nodes": STATE["nodes"],
-                               "masks": STATE["masks"]}, f, indent=1)
+                               "masks": STATE["masks"], "filters": STATE["filters"],
+                               "next_filter": STATE.get("next_filter", 1)}, f, indent=1)
             elif self.path == "/api/preset/load":
                 path = os.path.join(PRESETS, body["name"] + ".json")
                 with open(path) as f:
                     data = json.load(f)
                 STATE["region"] = data["region"]
                 for k in ("nodes", "masks"):
-                    for nid, params in data[k].items():
-                        STATE[k].setdefault(nid, {}).update(params)
+                    for nid, params in data.get(k, {}).items():
+                        if nid in STATE[k]:
+                            STATE[k][nid].update(params)
+                if "filters" in data:
+                    STATE["filters"] = data["filters"]
+                STATE["next_filter"] = data.get("next_filter", len(STATE["filters"]) + 1)
                 _cache.clear()
         if self.path != "/api/render" and self.path != "/api/select":
             save_state()
