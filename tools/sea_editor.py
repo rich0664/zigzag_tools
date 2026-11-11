@@ -86,11 +86,18 @@ def default_state():
 STATE_PATH = os.path.join(WORK, "editor_state.json")
 
 
+STATE_KEYS = ("region", "channel", "overlay_map", "nodes", "masks", "next_mask",
+              "filters", "next_filter")
+
+
 def save_state():
+    # the filter chain is part of the state; and write through a temp file so a
+    # restart during a save cannot truncate it
     try:
-        with open(STATE_PATH, "w") as f:
-            json.dump({k: STATE[k] for k in ("region", "channel", "overlay_map",
-                                             "nodes", "masks", "next_mask")}, f)
+        tmp = STATE_PATH + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump({k: STATE[k] for k in STATE_KEYS if k in STATE}, f)
+        os.replace(tmp, STATE_PATH)
     except Exception:
         pass
 
@@ -99,21 +106,26 @@ def load_state():
     try:
         with open(STATE_PATH) as f:
             data = json.load(f)
-        for k in ("region", "channel", "overlay_map", "nodes", "masks", "next_mask"):
+        for k in STATE_KEYS:
             if k in data:
                 STATE[k] = data[k]
+        STATE.setdefault("next_filter", len(STATE.get("filters", [])) + 1)
     except Exception:
         pass
 
 
+BLEND_MODES = ["add", "multiply", "lighter", "darker"]
+
 FILTER_DEFS = {
     "warp": dict(tiles=20.0, scale=700, seed=34),
-    "noise": dict(amp=0.15, scale=350, octaves=4, seed=11),
+    "noise": dict(amp=0.15, scale=350, octaves=4, seed=11, blend="add"),
     "blur": dict(radius=2),
-    "features": dict(amp=0.12, scale=70, density=0.70, octaves=4, seed=9),
-    "erode": dict(window=6, layers=20, mix=1.0),
-    "drainage": dict(scale=4, steps=4, k=2.0, m=0.5, n=1.0, cap=0.15, strength=1.0),
-    "shelf": dict(gain=1.0, power=1.0),
+    "features": dict(amp=0.12, scale=70, density=0.70, octaves=4, seed=9,
+                     blend="add"),
+    "erode": dict(window=6, layers=20, mix=1.0, blend="add"),
+    "drainage": dict(scale=4, steps=4, k=2.0, m=0.5, n=1.0, cap=0.15,
+                     strength=1.0, blend="add"),
+    "shelf": dict(gain=1.0, power=1.0, blend="add"),
 }
 
 DESC = {
@@ -154,6 +166,10 @@ DESC = {
     "palette.enabled": "maps the height to colour",
     "coast.levels": "width of the coastal pass in pixels",
     "coast.strength": "how strongly the coastal tint is mixed in",
+    "blend": "how this filter's contribution meets the height under it: "
+             "add = height + contribution; multiply = height x (1 + contribution), "
+             "so it fades out where the water is already deep or shallow; "
+             "lighter = only the brightening part; darker = only the deepening part",
     "coast.r": "coastal tint red", "coast.g": "coastal tint green", "coast.b": "coastal tint blue",
     "output.land_t": "depth shown under the land tiles (0 = shallowest colour)",
     "mask.source": "what the mask reads: height (of the tapped node), distance, or noise",
@@ -223,6 +239,17 @@ def sorted_curve(pts):
     for i in range(n - 1, -1, -1):
         xs[i] = min(xs[i], 1.0 - (n - 1 - i) * gap)
     return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
+
+
+def blend_into(h, c, mode):
+    """combine a filter's contribution with the height under it"""
+    if mode == "multiply":     # scales with the current height, sign preserved
+        return np.clip(h * (1.0 + c), 0, 1).astype(np.float32)
+    if mode == "lighter":      # only the brightening part
+        return np.clip(h + np.maximum(c, 0.0), 0, 1).astype(np.float32)
+    if mode == "darker":       # only the darkening part
+        return np.clip(h + np.minimum(c, 0.0), 0, 1).astype(np.float32)
+    return np.clip(h + c, 0, 1).astype(np.float32)
 
 
 def apply_curve(delta, pts):
@@ -301,8 +328,6 @@ def n_noise(node, ctx, prev_sig):
     n = sc.fbm(W, H, float(node["scale"]), int(node["octaves"]), seed=int(node["seed"])) - 0.5
     w = mask_weight(node, ctx) * float(node["amp"])
     c = 2.0 * w * n
-    if node.get("blend", "add") == "multiply":
-        c = h * c
     return np.clip(h + c, 0, 1), c
 
 
@@ -376,7 +401,11 @@ def n_coast(node, ctx, prev_sig):
         nxt = sc.dilate1(cur)
         band = np.where(nxt & ~cur, np.float32(k), band)
         cur = nxt
-    rim = np.clip(1.0 - (band - 1.0) / max(1.0, levels - 1.0), 0, 1)
+    # band is 0 everywhere outside the coated rings; without this test the
+    # formula turns that 0 into a rim of 1, tinting the whole ocean
+    rim = np.where(band > 0,
+                   np.clip(1.0 - (band - 1.0) / max(1.0, levels - 1.0), 0, 1),
+                   0.0).astype(np.float32)
     tint = np.array([float(node["r"]), float(node["g"]), float(node["b"])], dtype=np.float32)
     a = (float(node["strength"]) * rim)[:, :, None]
     out = rgb + (tint - rgb) * a        # lighten-only: dark pixels move, bright stay
@@ -550,14 +579,16 @@ def evaluate(progress=None, stop_at=None, region=None):
                 elif nid == "output":
                     val, contrib = n_output(node, ctx, chain_sig)
                 pts = node.get("out_curve")
-                if (isinstance(val, np.ndarray) and pts and len(pts) >= 2
+                has_curve = bool(pts) and len(pts) >= 2
+                if (isinstance(val, np.ndarray) and contrib is not None
+                        and ctx.get("h") is not None):
+                    c = apply_curve(contrib, pts) if has_curve else contrib
+                    val = blend_into(ctx["h"], c, node.get("blend", "add"))
+                elif (isinstance(val, np.ndarray) and has_curve
                         and (nid in ("height",) or filt is not None)):
-                    if contrib is not None and ctx.get("h") is not None:
-                        val = np.clip(ctx["h"] + apply_curve(contrib, pts), 0, 1)
-                    else:
-                        c = sorted_curve(pts)
-                        if c is not None:
-                            val = np.interp(val, c[0], c[1]).astype(np.float32)
+                    c = sorted_curve(pts)
+                    if c is not None:
+                        val = np.interp(val, c[0], c[1]).astype(np.float32)
             _cache[nid] = (chain_sig, val)
 
         if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
@@ -740,7 +771,8 @@ canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-to
     <button id=go>render</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
     <select id=presets style="width:auto;min-width:90px"></select>
-    <button id=load>load</button><button id=save>save</button><button id=reset>reset</button>
+    <button id=load>load</button><button id=save>save</button>
+    <button id=del title="delete the selected save">×</button><button id=reset>reset</button>
   </div>
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
   <div id=prev><img id=img draggable=false><img id=mapov draggable=false></div>
@@ -866,14 +898,16 @@ async function select(id){sel=id; await api('/api/select',{id});
   renderParams(); renderNodes(); renderMasks();}
 function field(kind,id,k,v,opts){
   const lab=document.createElement('label'); lab.textContent=k;
-  const dkey=(kind==='mask')?('mask.'+k):(kind==='filter'?(id+'.'+k):(id+'.'+k));
+  const dkey=(opts&&opts.dkey)?opts.dkey
+    :((k==='blend')?'blend':((kind==='mask')?('mask.'+k):(id+'.'+k)));
   const tip=(window.DESC||{})[dkey]
     ||(k==='enabled'?'enabled: off = this node passes its input straight through':'');
   lab.title=tip;
   let inp;
   if(k==='blend'){
     inp=document.createElement('select');
-    inp.innerHTML=['add','multiply'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
+    inp.innerHTML=['add','multiply','lighter','darker']
+      .map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
     inp.onchange=()=>set(kind,id,k,inp.value);
     inp.title=lab.title;
     return [lab,inp];
@@ -914,9 +948,15 @@ function renderParams(){
       }
     }
   } else if(filt){
+    const defs=(S.filter_defs||{})[filt.type]||{};
+    for(const [k,v] of Object.entries(defs)){
+      if(k==='masks'||k==='out_curve') continue;
+      el.append(...field('filter',filt.id,k,filt[k]!==undefined?filt[k]:v,
+        {dkey:filt.type+'.'+k}));
+    }
     for(const [k,v] of Object.entries(filt)){
-      if(['id','type','enabled','masks','out_curve'].includes(k)) continue;
-      el.append(...field('filter',filt.type,k,v));
+      if(k in defs||['id','type','enabled','masks','out_curve'].includes(k)) continue;
+      el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k}));
     }
     if(filt.out_curve){
       const w=document.getElementById('curvewrap');
@@ -1065,6 +1105,9 @@ document.getElementById('save').onclick=()=>{const n=prompt('save preset as',
   presets.value||'preset'); if(n) api('/api/preset/save',{name:n}).then(loadPresets);};
 document.getElementById('load').onclick=async()=>{const n=presets.value;
   if(n){await api('/api/preset/load',{name:n}); await boot();}};
+document.getElementById('del').onclick=async()=>{const n=presets.value;
+  if(!n || !confirm('delete save "'+n+'"?')) return;
+  await api('/api/preset/del',{name:n}); await loadPresets();};
 const region=()=>({x0:+rx.value,y0:+ry.value,w:+rw.value,h:+rh.value,scale:+scale.value});
 for(const id of ['rx','ry','rw','rh']) document.getElementById(id).onchange=()=>{
   const r=region(); api('/api/set',{id:'region',k:'all',v:r}).then(()=>{S.region=r;
@@ -1247,11 +1290,33 @@ class Handler(BaseHTTPRequestHandler):
                 STATE["last"] = body.get("id")
             elif self.path == "/api/preset/save":
                 os.makedirs(PRESETS, exist_ok=True)
-                path = os.path.join(PRESETS, body["name"] + ".json")
+                name = os.path.basename(body["name"])
+                path = os.path.join(PRESETS, name + ".json")
                 with open(path, "w") as f:
                     json.dump({"region": STATE["region"], "nodes": STATE["nodes"],
                                "masks": STATE["masks"], "filters": STATE["filters"],
                                "next_filter": STATE.get("next_filter", 1)}, f, indent=1)
+            elif self.path == "/api/restore":
+                # put a whole state back, e.g. from the browser copy after a restart
+                body = {k: v for k, v in body.items() if k in STATE_KEYS}
+                for k in ("nodes", "masks"):
+                    for nid, params in body.get(k, {}).items():
+                        if nid in STATE[k]:
+                            STATE[k][nid].update(params)
+                if "filters" in body:
+                    STATE["filters"] = body["filters"]
+                for k in ("region",):
+                    if k in body:
+                        STATE[k].update(body[k])
+                for k in ("channel", "overlay_map", "next_mask", "next_filter"):
+                    if k in body:
+                        STATE[k] = body[k]
+                _cache.clear()
+            elif self.path == "/api/preset/del":
+                name = os.path.basename(body.get("name", ""))
+                path = os.path.join(PRESETS, name + ".json")
+                if name and os.path.isfile(path):
+                    os.remove(path)
             elif self.path == "/api/preset/load":
                 path = os.path.join(PRESETS, body["name"] + ".json")
                 with open(path) as f:
@@ -1276,7 +1341,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    global PORT
+    global PORT, STATE_PATH
     ap = argparse.ArgumentParser(description="sea texture editor")
     ap.add_argument("--port", type=int, default=PORT,
                     help="port to serve on (default 3007); use a second port to "
@@ -1284,6 +1349,9 @@ def main():
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
     PORT = args.port
+    if PORT != 3007:
+        # a second port must not overwrite the state of the session you drive
+        STATE_PATH = os.path.join(WORK, f"editor_state_{PORT}.json")
     load_map()
     load_state()
     if not args.no_browser:
