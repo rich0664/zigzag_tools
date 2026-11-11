@@ -86,6 +86,56 @@ def default_state():
     }
 
 
+
+DESC = {
+    "distance.down": "distance-field resolution: 1 = one pixel per tile, 2 = two tiles per pixel (cheaper)",
+    "warp.tiles": "how far the distance field is displaced, in tiles",
+    "warp.scale": "feature size of the warp, in tiles (larger = broader bends)",
+    "height.mode": "ramp = one exponential falloff; profile = shelf, shelf break, slope, abyss",
+    "height.deep_dist": "distance in tiles at which the floor reaches its lowest point",
+    "height.curve": "exponent on the ramp: >1 keeps shallow water wide, <1 drops off sooner",
+    "height.shelf_t": "profile mode: fraction of deep_dist that is flat shelf",
+    "height.slope_t": "profile mode: fraction of deep_dist where the shelf break happens",
+    "height.abyss_t": "profile mode: unused end marker for the abyssal plain",
+    "noise.amp": "how much the noise adds to the height (0.1 is subtle, 0.4 is strong)",
+    "noise.scale": "noise feature size in tiles: small = fine grain, large = broad swells",
+    "noise.octaves": "number of noise octaves; each adds finer detail",
+    "noise.seed": "random seed; change for a different pattern at the same scale",
+    "noise.blend": "add = offset the height, multiply = scale it by the noise",
+    "features.amp": "height of the added seamounts/bumps",
+    "features.scale": "size of individual features, in tiles",
+    "features.density": "threshold; higher = fewer, more isolated bumps",
+    "features.octaves": "noise octaves used to place the features",
+    "features.seed": "random seed for feature placement",
+    "erode.window": "search window in tiles; larger = longer, smoother slopes",
+    "erode.layers": "number of threshold passes; more = smoother and slower",
+    "erode.mix": "0 = untouched height, 1 = fully eroded",
+    "drainage.scale": "resolution divisor for the drainage solve (4 = quarter res)",
+    "drainage.steps": "how many incision passes; more = deeper, more developed channels",
+    "drainage.k": "incision strength per pass",
+    "drainage.m": "area exponent: low spreads erosion, high concentrates it into trunks",
+    "drainage.n": "slope exponent: high favours steep faces",
+    "drainage.cap": "maximum incision per pass, keeps channels from exploding",
+    "drainage.strength": "overall multiplier on the carved depth",
+    "shelf.gain": "scales the height, pushing shallow water up or down",
+    "shelf.power": "exponent on the height: >1 darkens mid-depths, <1 lifts them",
+    "shade.amp": "hillshade strength (0 = flat, 1.5 = strong relief)",
+    "shade.lo": "lower clamp of the shade multiplier",
+    "shade.hi": "upper clamp of the shade multiplier",
+    "palette.enabled": "maps the height to colour",
+    "coast.levels": "width of the coastal pass in pixels",
+    "coast.strength": "how strongly the coastal tint is mixed in",
+    "coast.r": "coastal tint red", "coast.g": "coastal tint green", "coast.b": "coastal tint blue",
+    "output.land_t": "depth shown under the land tiles (0 = shallowest colour)",
+    "mask.source": "what the mask reads: height (of the tapped node), distance, or noise",
+    "mask.tap": "which node's height to read; empty = the height at the node using this mask",
+    "mask.scale": "noise feature size when the source is noise",
+    "mask.lo": "mask starts rising above this value",
+    "mask.hi": "mask is fully on at this value",
+    "mask.feather": "softness of the edge (unused in the current mapping)",
+    "mask.invert": "flip the mask",
+}
+
 STATE = default_state()
 
 
@@ -122,6 +172,17 @@ def load_region(region):
 
 def sig(*parts):
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=float).encode()).hexdigest()[:16]
+
+
+def box2(a):
+    return sc.box_blur(a, 1, 1)
+
+
+def apply_curve(delta, pts):
+    xs = [float(p[0]) for p in pts]
+    ys = [float(p[1]) for p in pts]
+    a = np.abs(delta)
+    return np.sign(delta) * np.interp(a, xs, ys).astype(np.float32)
 
 
 def mask_field(mask, ctx, fallback=None):
@@ -191,7 +252,10 @@ def n_noise(node, ctx, prev_sig):
     H, W = h.shape
     n = sc.fbm(W, H, float(node["scale"]), int(node["octaves"]), seed=int(node["seed"])) - 0.5
     w = mask_weight(node, ctx) * float(node["amp"])
-    return np.clip(h + 2.0 * w * n, 0, 1), None
+    c = 2.0 * w * n
+    if node.get("blend", "add") == "multiply":
+        c = h * c
+    return np.clip(h + c, 0, 1), c
 
 
 def n_features(node, ctx, prev_sig):
@@ -200,7 +264,8 @@ def n_features(node, ctx, prev_sig):
     n = sc.fbm(W, H, float(node["scale"]), int(node["octaves"]), seed=int(node["seed"]))
     bumps = np.clip((n - float(node["density"])) / max(1e-3, 1.0 - float(node["density"])), 0, 1) ** 1.6
     w = mask_weight(node, ctx) * float(node["amp"])
-    return np.clip(h + w * bumps, 0, 1), None
+    c = w * bumps
+    return np.clip(h + c, 0, 1), c
 
 
 def n_erode(node, ctx, prev_sig):
@@ -213,23 +278,36 @@ def n_erode(node, ctx, prev_sig):
                        layers=int(node["layers"]))
     he = sc.upscale(he, (W, H))
     mix = float(node["mix"]) * mask_weight(node, ctx)
-    return np.clip(h * (1 - mix) + he * mix, 0, 1), None
+    out = np.clip(h * (1 - mix) + he * mix, 0, 1)
+    return out, out - h
 
 
 def n_shelf(node, ctx, prev_sig):
     h = ctx["h"]
     w = mask_weight(node, ctx)
     gain = 1.0 + (float(node["gain"]) - 1.0) * w
-    return np.clip(h ** float(node["power"]) * gain, 0, 1), None
+    out = np.clip(h ** float(node["power"]) * gain, 0, 1)
+    return out, out - h
 
 
 def n_shade(node, ctx, prev_sig):
-    return ctx["h"], None
+    h = ctx["h"]
+    hh = box2(h)
+    gy, gx = np.gradient(hh)
+    nrm = np.sqrt(gx * gx + gy * gy + 1.0)
+    Lv = np.array([-0.5, -0.6, 0.62]); Lv /= np.linalg.norm(Lv)
+    sh = (-gx * Lv[0] - gy * Lv[1] + Lv[2]) / nrm
+    ctx["shade"] = np.clip(1.0 + float(node["amp"]) * (sh - 0.62),
+                           float(node["lo"]), float(node["hi"]))
+    return h, None
 
 
 def n_palette(node, ctx, prev_sig):
     t = np.clip(1.0 - ctx["h"], 0, 1)
     rgb = np.stack([np.interp(t, sc.PALETTE_STOPS, sc.PALETTE_COLS[:, i]) for i in range(3)], -1)
+    sh = ctx.get("shade")
+    if sh is not None:
+        rgb = rgb * sh[:, :, None]
     return rgb, None
 
 
@@ -243,8 +321,10 @@ def n_coast(node, ctx, prev_sig):
         band = np.where(nxt & ~cur, np.float32(k), band)
         cur = nxt
     rim = np.clip(1.0 - (band - 1.0) / max(1.0, levels - 1.0), 0, 1)
-    add = np.array([node["r"], node["g"], node["b"]], dtype=np.float32) * float(node["strength"])
-    return rgb + add * rim[:, :, None], None
+    tint = np.array([float(node["r"]), float(node["g"]), float(node["b"])], dtype=np.float32)
+    a = (float(node["strength"]) * rim)[:, :, None]
+    out = rgb + (tint - rgb) * a        # lighten-only: dark pixels move, bright stay
+    return np.maximum(rgb, out), None
 
 
 def n_output(node, ctx, prev_sig):
@@ -315,10 +395,27 @@ def n_drainage(node, ctx, prev_sig):
 
     dh_up = np.array(Image.fromarray(dh, mode="F").resize((W, H), Image.BICUBIC))
     w = mask_weight(node, ctx) * float(node.get("strength", 1.0))
-    return np.clip(h - dh_up * w, 0, 1), None
+    c = -dh_up * w
+    return np.clip(h + c, 0, 1), c
 
 
 SCALAR_NODES = {"height", "noise", "features", "erode", "drainage", "shelf"}
+
+# what each node consumes and produces, shown in the node list
+NODE_IO = {
+    "distance": ("land", "distance"),
+    "warp": ("distance", "distance"),
+    "height": ("distance", "height"),
+    "noise": ("height", "height"),
+    "features": ("height", "height"),
+    "erode": ("height", "height"),
+    "drainage": ("height", "height"),
+    "shelf": ("height", "height"),
+    "shade": ("height", "shade"),
+    "palette": ("height + shade", "colour"),
+    "coast": ("colour", "colour"),
+    "output": ("colour", "image"),
+}
 
 ORDER = [
     ("distance", n_distance), ("warp", n_warp), ("height", n_height),
@@ -328,7 +425,7 @@ ORDER = [
 ]
 
 
-def evaluate(progress=None):
+def evaluate(progress=None, stop_at=None):
     """run the chain, reusing cache entries whose signature still matches"""
     global _cache
     region = STATE["region"]
@@ -353,19 +450,25 @@ def evaluate(progress=None):
             if not node.get("enabled", True):
                 val = None
             else:
-                val, _ = fn(node, ctx, chain_sig)
+                prev_h = ctx.get("h")
+                val, contrib = fn(node, ctx, chain_sig)
                 pts = node.get("out_curve")
                 if (isinstance(val, np.ndarray) and nid in SCALAR_NODES
                         and pts and len(pts) >= 2):
-                    xs = [float(p[0]) for p in pts]
-                    ys = [float(p[1]) for p in pts]
-                    val = np.interp(val, xs, ys).astype(np.float32)
+                    if contrib is not None and prev_h is not None:
+                        val = np.clip(prev_h + apply_curve(contrib, pts), 0, 1)
+                    else:
+                        xs = [float(p[0]) for p in pts]
+                        ys = [float(p[1]) for p in pts]
+                        val = np.interp(val, xs, ys).astype(np.float32)
             _cache[nid] = (chain_sig, val)
         new_cache[nid] = (chain_sig, val)
 
         ctx.setdefault("fields", {})
         if isinstance(val, np.ndarray) and val.ndim == 2:
             ctx["fields"][nid] = val
+        if stop_at and nid == stop_at:
+            break
         if nid == "distance":
             ctx["d"] = val if val is not None else ctx["d"]
         elif nid in ("warp",):
@@ -423,8 +526,10 @@ def render_now(auto=False):
                        started=time.time(), elapsed=0.0, error=None)
         t0 = time.time()
         try:
-            ctx = evaluate(_progress)
-            rgb = channel_image(ctx, STATE.get("channel", "output"))
+            ch = STATE.get("channel", "output")
+            stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
+            ctx = evaluate(_progress, stop_at=stop or None)
+            rgb = channel_image(ctx, ch)
             buf = io.BytesIO()
             Image.fromarray(rgb, "RGB").save(buf, "PNG")
             with _lock:
@@ -473,12 +578,16 @@ font:12px/1.4 ui-monospace,monospace;display:flex;height:100vh;overflow:hidden}
 #left,#right{width:260px;background:var(--b);overflow:auto;padding:8px;flex:0 0 auto}
 #mid{flex:1;display:flex;flex-direction:column;min-width:0}
 #top{display:flex;gap:6px;padding:6px;background:var(--b);align-items:center;flex-wrap:wrap}
+#top input[type=number]{width:62px}
+#top select{width:auto}
 #prev{flex:1;overflow:hidden;position:relative;cursor:grab;display:flex;
 align-items:center;justify-content:center;background:#0a1016}
 #prev img{position:static;image-rendering:pixelated;max-width:100%;max-height:100%}
 .node{padding:2px 5px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
 .node.sel{background:#24405a}.node input{cursor:pointer}
 .x{margin-left:auto;color:#8fa6ba;padding:0 4px}.x:hover{color:#e08a8a}
+.io{color:#6b8093;font-size:10px;margin-left:auto;white-space:nowrap}
+.tap{color:#7fa9c4;font-size:10px}
 label{display:block;margin:5px 0 2px;color:#8fa6ba}
 input[type=number],input[type=text],select{width:100%;background:#0b1117;color:var(--t);
 border:1px solid #2a3a4b;padding:2px 4px}
@@ -526,7 +635,7 @@ async function poll(){
 }
 function render(){api('/api/render',{}).then(()=>setTimeout(poll,120));}
 async function boot(){
-  S=await api('/api/state');
+  S=await api('/api/state'); window.DESC=S.desc||{};
   document.getElementById('auto').checked=!!S.auto;
   rx.value=S.region.x0; ry.value=S.region.y0; rw.value=S.region.w; rh.value=S.region.h;
   scale.value=String(S.region.scale);
@@ -544,6 +653,14 @@ function renderNodes(){
     const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=n.enabled;
     cb.onclick=e=>{e.stopPropagation(); set('nodes',id,'enabled',cb.checked);};
     d.appendChild(cb); d.appendChild(document.createTextNode(id));
+    const io=S.io&&S.io[id];
+    if(io){
+      const sp=document.createElement('span'); sp.className='io';
+      sp.textContent=io[0]+' → '+io[1];
+      sp.title=id+' takes '+io[0]+' and outputs '+io[1]+
+        ((n.masks!==undefined)?' (accepts mask nodes)':'');
+      d.appendChild(sp);
+    }
     d.onclick=()=>select(id); el.appendChild(d);
   }
 }
@@ -552,7 +669,12 @@ function renderMasks(){
   for(const id of Object.keys(S.masks)){
     const m=S.masks[id];
     const d=document.createElement('div'); d.className='node'+(sel===id?' sel':'');
-    d.appendChild(document.createTextNode(id+' · '+m.source));
+    d.appendChild(document.createTextNode(id));
+    const sp=document.createElement('span'); sp.className='io tap';
+    sp.textContent=(m.source==='height'?(m.tap||'this node'):m.source)+' → mask';
+    sp.title='reads '+(m.source==='height'?('height at '+(m.tap||'the consuming node')):m.source)+
+      ' and outputs a mask';
+    d.appendChild(sp);
     const x=document.createElement('span'); x.className='x'; x.textContent='×';
     x.onclick=e=>{e.stopPropagation(); api('/api/mask/del',{id}).then(reload);};
     d.appendChild(x); d.onclick=()=>select(id); el.appendChild(d);
@@ -562,7 +684,7 @@ async function loadPresets(){
   const r=await api('/api/presets');
   document.getElementById('presets').innerHTML=r.presets.map(n=>`<option>${n}</option>`).join('');
 }
-async function reload(){S=await api('/api/state'); renderTop(); renderNodes();
+async function reload(){S=await api('/api/state'); window.DESC=S.desc||{}; renderTop(); renderNodes();
   renderMasks(); renderParams();}
 async function select(id){sel=id; await api('/api/select',{id});
   document.getElementById('nodeTitle').textContent=id;
@@ -570,6 +692,13 @@ async function select(id){sel=id; await api('/api/select',{id});
 function field(kind,id,k,v,opts){
   const lab=document.createElement('label'); lab.textContent=k;
   let inp;
+  if(k==='blend'){
+    inp=document.createElement('select');
+    inp.innerHTML=['add','multiply'].map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
+    inp.onchange=()=>set(kind,id,k,inp.value);
+    inp.title=(window.DESC||{})[kind+'.'+id+'.'+k]||'';
+    return [lab,inp];
+  }
   if(kind==='mask'&&k==='tap'||opts&&opts.select){
     inp=document.createElement('select');
     inp.innerHTML=(opts&&opts.options||[]).map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
@@ -584,6 +713,7 @@ function field(kind,id,k,v,opts){
     inp=document.createElement('input'); inp.type='text'; inp.value=v;
     inp.onchange=()=>set(kind,id,k,inp.value);
   }
+  inp.title=(window.DESC||{})[kind+'.'+id+'.'+k]||'';
   return [lab,inp];
 }
 function renderParams(){
@@ -591,7 +721,9 @@ function renderParams(){
   document.getElementById('curvewrap').innerHTML='';
   const node=S.nodes[sel], mask=S.masks[sel];
   if(mask){
+    const KEYS=['source','tap','scale','lo','hi','feather','invert'];
     for(const [k,v] of Object.entries(mask)){
+      if(!KEYS.includes(k)) continue;
       if(k==='tap'){
         const o=[''].concat(S.taps);
         el.append(...field('mask',sel,k,v,{select:true,options:o}));
@@ -733,6 +865,7 @@ class Handler(BaseHTTPRequestHandler):
                       "order": [n for n, _ in ORDER],
                       "channels": ["output", "h", "d", "color"] + list(STATE["masks"].keys()),
                       "taps": [n for n, _ in ORDER if n in SCALAR_NODES],
+                      "desc": DESC, "io": NODE_IO,
                       "last": STATE.get("last", "erode"), "auto": _render["auto"]}
             self._json(st)
         else:
