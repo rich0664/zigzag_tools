@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         zig~zag sea depth
 // @namespace    zigzagTools
-// @version      0.2.6
+// @version      0.2.7
 // @description  Draws a bathymetric sea between the zig-zag.fm archipelagos: depth = distance from land, terrain = layered noise, rendered tile-aligned behind the map.
 // @match        https://www.zig-zag.fm/*
 // @grant        none
@@ -24,7 +24,7 @@
   'use strict';
 
   const SEA_URL = window.__ZZ_SEA_URL ||
-    'https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist/zigzag-sea.webp?v=0.2.6';
+    'https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist/zigzag-sea.webp?v=0.2.7';
   const MAP_W = 7749;          // main map extent, in tiles
   const MAP_H = 5254;
   const OV_ID = 'zz-sea';
@@ -55,9 +55,13 @@
       deck.parentNode.insertBefore(ov, deck);
     }
     ov.style.cssText = (deck.getAttribute('style') || '') + ';pointer-events:none';
-    if (ov.width !== deck.width || ov.height !== deck.height) {
-      ov.width = deck.width;
-      ov.height = deck.height;
+    // work in CSS pixels: quality settings and devicePixelRatio change the
+    // canvas backing store, which would otherwise shift the projection
+    const cw = deck.clientWidth || deck.width;
+    const ch = deck.clientHeight || deck.height;
+    if (ov.width !== cw || ov.height !== ch) {
+      ov.width = cw;
+      ov.height = ch;
     }
     return ov;
   }
@@ -72,7 +76,8 @@
 
     const pad = vs.padding || {};
     const z = Math.pow(2, vs.zoom);
-    const W = deck.width, H = deck.height;
+    const W = deck.clientWidth || deck.width;
+    const H = deck.clientHeight || deck.height;
 
     const sig = [vs.zoom, vs.target[0], vs.target[1], pad.left, pad.right, W, H].join('|');
     if (sig === state.sig) return;
