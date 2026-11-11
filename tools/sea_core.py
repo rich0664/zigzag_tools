@@ -31,7 +31,7 @@ CFG = dict(
     ease_max=60.0,
     ease_noise_scale=700,
     shore_base=0.015,        # depth value right at the beach
-    shore_lift=0.05,         # how much it darkens across the pool
+    shore_lift=0.02,         # how much it darkens across the pool
 
     # ---- open water -----------------------------------------------------
     deep_base=0.18,          # depth at the pool edge
@@ -60,6 +60,9 @@ CFG = dict(
     second_weight=0.4,
     grain_weight=0.05,
     relief_blur_tiles=2,
+    relief_near_tiles=4.0,   # bright relief reaches this close to the shore
+    relief_dark_start=3.0,   # dark relief only starts this far out
+    relief_dark_tiles=12.0,
     regional_min=0.7,        # regional erosion strength
     regional_max=1.6,
 
@@ -70,6 +73,9 @@ CFG = dict(
 
     # ---- colour ---------------------------------------------------------
     land_t=0.58,             # tone under the land (covered by tiles in game)
+    land_band=2,             # tiles of coast tone pushed INTO the land fill, so
+                             # the tiles' seam never shows a dark ring
+    land_band_t=None,        # None = use shore_base
     rim_min=2.0,             # coast pass range, tiles
     rim_max=5.0,
     rim_noise_scale=1200,
@@ -255,10 +261,36 @@ def render(land, d, cfg=CFG):
     relief = upscale(relief, (W, H))
 
     # --------------------------------------------------------------- depth
-    fx_mask = smoothstep((d - 1.0) / 9.0)
-    t = t_shore + (deep_b + cfg["relief_amp"] * relief * fx_mask - t_shore) * ease
+    # bright relief is allowed right up to the shore, dark relief is held back:
+    # masking both equally left a band with no bright wisps next to the island,
+    # which read as a ring darker than the water outside it
+    fx_bright = smoothstep(d / cfg["relief_near_tiles"])
+    fx_dark = smoothstep((d - cfg["relief_dark_start"]) / cfg["relief_dark_tiles"])
+    relief_term = np.maximum(relief, 0.0) * fx_bright + np.minimum(relief, 0.0) * fx_dark
+    fx_mask = fx_dark
+    t = t_shore + (deep_b + cfg["relief_amp"] * relief_term - t_shore) * ease
+    del relief_term
     del deep_b, t_shore, ease, L
-    t = np.where(land, cfg["land_t"], t)
+    if cfg["land_t"] is not None:
+        t = np.where(land, cfg["land_t"], t)
+
+    # push the shore tone a couple of tiles into the land footprint: the map's
+    # tiles sit slightly inset, so a dark land fill would otherwise peek out as
+    # a ring that is darker than the water beside it
+    if cfg["land_band"] > 0:
+        grow = ~land
+        for _ in range(int(cfg["land_band"])):
+            grow = dilate1(grow)
+        band = grow & land
+        band_t = cfg["shore_base"] if cfg["land_band_t"] is None else cfg["land_band_t"]
+        t = np.where(band, band_t, t)
+        del grow, band
+
+    # invariant: open water is never brighter than the shelf, so an island edge
+    # is always the highest point in the picture
+    shelf_floor = cfg["shore_base"] + cfg["shore_lift"]
+    t = np.where(land, t, np.maximum(t, shelf_floor))
+
     t = np.clip(t, 0, 1)
 
     # ------------------------------------------------------------ shading
