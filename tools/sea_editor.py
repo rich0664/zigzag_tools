@@ -129,7 +129,7 @@ FILTER_DEFS = {
     "shelf": dict(gain=1.0, power=1.0, blend="add"),
     # regional base level: low-frequency field, optionally quantised into
     # terraces, added to the height so whole areas sit at different depths
-    "regions": dict(scale=2500.0, octaves=3, levels=3, mix=0.5, amp=0.35,
+    "regions": dict(scale=2500.0, octaves=3, levels=3, soft=0.45, amp=0.35,
                     seed=7, blend="add"),
 }
 
@@ -174,8 +174,9 @@ DESC = {
     "regions.scale": "size of a region in tiles: 1500-3000 gives ocean-scale "
                      "platforms, smaller gives banks and shoals",
     "regions.levels": "how many distinct platform heights; 1 = one smooth field",
-    "regions.mix": "0 = smooth swells, 1 = hard flat terraces, in between = "
-                   "banks that flatten out",
+    "regions.soft": "width of the ramp between two shelf levels: 0 = a hard "
+                    "terrace edge, 1 = no terraces at all (smooth field), 0.4-0.6 "
+                    "gives platforms that slope into each other",
     "regions.amp": "how far a region can sit above or below the base depth",
     "regions.octaves": "detail within the regional field",
     "regions.seed": "different arrangement of regions",
@@ -609,10 +610,20 @@ def f_regions(h, node, ctx):
     n = sc.fbm(W, H, max(8.0, float(node["scale"])),
                int(node.get("octaves", 3)), seed=int(node.get("seed", 7)))
     lv = max(1, int(node.get("levels", 3)))
-    if lv > 1:
-        t = np.round(n * lv) / lv                 # flat platforms per level
-        m = min(1.0, max(0.0, float(node.get("mix", 0.5))))
-        n = n * (1.0 - m) + t * m
+    # soft = width of the ramp between two levels, as a fraction of a level:
+    # 0 gives the cliff edge of a clean terrace, 1 gives the smooth field back
+    soft = node.get("soft")
+    if soft is None:                       # presets saved with the old "mix"
+        soft = 1.0 - float(node.get("mix", 0.5))
+    soft = min(1.0, max(0.0, float(soft)))
+    if lv > 1 and soft < 0.999:            # 1.0 = leave the field smooth
+        x = n * lv
+        i = np.floor(x)
+        f = x - i
+        w = 0.5 * soft + 1e-4
+        f2 = np.clip((f - 0.5) / (2.0 * w) + 0.5, 0.0, 1.0)
+        f2 = f2 * f2 * (3.0 - 2.0 * f2)    # smoothstep the ramp, no creases
+        n = (i + f2) / lv
     c = (n - 0.5) * float(node["amp"]) * mask_weight(node, ctx)
     return np.clip(h + c, 0, 1).astype(np.float32), c.astype(np.float32)
 
