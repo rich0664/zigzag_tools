@@ -178,7 +178,7 @@ DESC = {
     "mask.scale": "noise feature size when the source is noise",
     "mask.lo": "mask starts rising above this value",
     "mask.hi": "mask is fully on at this value",
-    "mask.feather": "softness of the edge (unused in the current mapping)",
+    "mask.feather": "not used yet: the edge softness comes from lo/hi",
     "mask.invert": "flip the mask",
 }
 
@@ -757,6 +757,8 @@ h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter
 #bar{height:100%;width:0;background:#2f6a8c;transition:width .12s linear}
 #prog{position:absolute;left:8px;top:0;line-height:18px;font-size:11px;color:#cfe0ee}
 canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-top:4px}
+label.off{opacity:.38}
+input.off,select.off{opacity:.38}
 .small{color:#7d93a6}
 </style>
 <div id=left><h3>pipeline</h3><div id=nodes></div>
@@ -898,6 +900,31 @@ async function reload(){S=await api('/api/state'); window.DESC=S.desc||{}; rende
 async function select(id){sel=id; await api('/api/select',{id});
   document.getElementById('nodeTitle').textContent=id;
   renderParams(); renderNodes(); renderMasks();}
+const CHOICES={
+  'nodes.height.mode':['profile','ramp'],
+  'nodes.distance.down':['1','2']
+};
+// a parameter nothing reads (wrong mode, wrong source, node switched off) is
+// shown greyed out, so the panel says which knobs currently do anything
+function inactiveParam(kind,id,k,o){
+  if(!o) return false;
+  if(kind==='nodes'){
+    if(id==='height'){
+      if(k==='abyss_t') return true;          // no code path reads it
+      if(k==='shelf_t'||k==='slope_t') return o.mode!=='profile';
+      return o.enabled===false;
+    }
+    if(id==='palette'||id==='coast') return o.enabled===false;
+    return false;                      // distance.down still shapes the load
+  }
+  if(kind==='filter') return o.enabled===false;
+  if(kind==='mask'){
+    if(k==='feather') return true;            // not mapped into the mask weight
+    if(k==='tap') return o.source!=='height';
+    if(k==='scale') return o.source!=='noise';
+  }
+  return false;
+}
 function field(kind,id,k,v,opts){
   const lab=document.createElement('label'); lab.textContent=k;
   const dkey=(opts&&opts.dkey)?opts.dkey
@@ -906,18 +933,12 @@ function field(kind,id,k,v,opts){
     ||(k==='enabled'?'enabled: off = this node passes its input straight through':'');
   lab.title=tip;
   let inp;
-  if(k==='blend'){
+  const choices=(k==='blend')?['add','multiply','lighter','darker']
+    :((opts&&opts.options)||CHOICES[kind+'.'+id+'.'+k]||null);
+  if(choices){
     inp=document.createElement('select');
-    inp.innerHTML=['add','multiply','lighter','darker']
-      .map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
-    inp.onchange=()=>set(kind,id,k,inp.value);
-    inp.title=lab.title;
-    return [lab,inp];
-  }
-  if(kind==='mask'&&k==='tap'||opts&&opts.select){
-    inp=document.createElement('select');
-    inp.innerHTML=(opts&&opts.options||[]).map(o=>`<option ${o===v?'selected':''}>${o}</option>`).join('');
-    inp.onchange=()=>set(kind,id,k,inp.value);
+    inp.innerHTML=choices.map(o=>`<option ${String(o)===String(v)?'selected':''}>${o}</option>`).join('');
+    inp.onchange=()=>set(kind,id,k,typeof v==='number'?parseFloat(inp.value):inp.value);
   } else if(typeof v==='boolean'){
     inp=document.createElement('input'); inp.type='checkbox'; inp.checked=v;
     inp.onchange=()=>set(kind,id,k,inp.checked);
@@ -929,6 +950,9 @@ function field(kind,id,k,v,opts){
     inp.onchange=()=>set(kind,id,k,inp.value);
   }
   inp.title=lab.title;
+  if(opts&&opts.obj&&inactiveParam(kind,id,k,opts.obj)){
+    lab.classList.add('off'); inp.classList.add('off'); inp.disabled=true;
+  }
   return [lab,inp];
 }
 function renderParams(){
@@ -942,11 +966,11 @@ function renderParams(){
       if(!KEYS.includes(k)) continue;
       if(k==='tap'){
         const o=[''].concat(S.taps);
-        el.append(...field('mask',sel,k,v,{select:true,options:o}));
+        el.append(...field('mask',sel,k,v,{options:o,obj:mask}));
       } else if(k==='source'){
-        el.append(...field('mask',sel,k,v,{select:true,options:['height','distance','noise']}));
+        el.append(...field('mask',sel,k,v,{options:['height','distance','noise'],obj:mask}));
       } else {
-        el.append(...field('mask',sel,k,v));
+        el.append(...field('mask',sel,k,v,{obj:mask}));
       }
     }
   } else if(filt){
@@ -954,11 +978,11 @@ function renderParams(){
     for(const [k,v] of Object.entries(defs)){
       if(k==='masks'||k==='out_curve') continue;
       el.append(...field('filter',filt.id,k,filt[k]!==undefined?filt[k]:v,
-        {dkey:filt.type+'.'+k}));
+        {dkey:filt.type+'.'+k,obj:filt}));
     }
     for(const [k,v] of Object.entries(filt)){
       if(k in defs||['id','type','enabled','masks','out_curve'].includes(k)) continue;
-      el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k}));
+      el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k,obj:filt}));
     }
     if(filt.out_curve){
       const w=document.getElementById('curvewrap');
@@ -987,7 +1011,7 @@ function renderParams(){
     for(const [k,v] of Object.entries(node)){
       if(k==='masks'||k==='out_curve'||k==='enabled') continue;
       if(sel==='coast'&&['r','g','b'].includes(k)) continue;
-      el.append(...field('nodes',sel,k,v));
+      el.append(...field('nodes',sel,k,v,{obj:node}));
     }
     if(sel==='coast'){
       const lab=document.createElement('label'); lab.textContent='tint';
@@ -1100,6 +1124,7 @@ addEventListener('mouseup',()=>{ if(!curveDrag) return;
   draw(); cb(pts); });
 async function set(kind,id,k,v){
   await api('/api/set',{id,k,v}); S=await api('/api/state'); window.DESC=S.desc||{};
+  if(k==='mode'||k==='source'||k==='enabled') renderParams();
   if(S.auto) setTimeout(poll,120); else poll();
 }
 document.getElementById('go').onclick=render;
