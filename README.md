@@ -44,3 +44,27 @@ window.__zzSea.on = false   // off
 window.__zzSea.on = true    // on
 ```
 
+## Texture generator
+
+`tools/build_sea.py` rebuilds `dist/zigzag-sea.webp` (7749 × 5254, one pixel per
+map tile). Needs numpy + Pillow:
+
+```bash
+python3 tools/build_sea.py     # ~3 min, writes dist/zigzag-sea.webp
+python3 tools/sea_crop.py      # ~20 s, 1550 x 1050 crop in out/sea/v2_crop.png
+```
+
+The first run downloads the map raster into `out/sea/` and caches the distance
+field there; later runs reuse them. Every knob is inline with comments — the
+ones worth touching first:
+
+| knob | where | effect |
+|---|---|---|
+| `L` | pool length | how far the bright shallow terrace reaches (2–22 tiles) |
+| `F` | ease-off | how long it takes to blend into the basin |
+| deep curve | `0.18 + 0.62 * (1 - exp(-dd / 260))` | overall depth range |
+| `slab_erode(...)` | erosion | window + layer count; more layers = smoother dunes |
+| `carved` weight | `relief += 1.35 * ...` | the flow/tendril structure |
+| relief into `t` | `0.26 * relief` | how much the seabed drives colour vs shading |
+| palette `cols` | bottom | colour ramp |
+| coast pass | `rgb + (95,155,195) * 0.13 * rim` | shoreline strength |
