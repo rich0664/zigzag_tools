@@ -22,7 +22,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 
 import sea_core as sc
 
@@ -131,6 +131,10 @@ FILTER_DEFS = {
     # terraces, added to the height so whole areas sit at different depths
     "regions": dict(scale=2500.0, octaves=3, levels=3, soft=0.45, amp=0.35,
                     seed=7, blend="add"),
+    # one floor depth per open patch: the sea is split at the sills between
+    # deep points, and each patch gets its own level
+    "basins": dict(threshold=60.0, spacing=120.0, levels=4, soft=40.0,
+                   amp=0.4, seed=5, blend="add"),
 }
 
 DESC = {
@@ -177,6 +181,15 @@ DESC = {
     "regions.soft": "width of the ramp between two shelf levels: 0 = a hard "
                     "terrace edge, 1 = no terraces at all (smooth field), 0.4-0.6 "
                     "gives platforms that slope into each other",
+    "basins.threshold": "how open water must be, in tiles from land, to count as "
+                        "a basin at all",
+    "basins.spacing": "minimum distance between basin centres in tiles: larger "
+                      "means fewer, bigger patches",
+    "basins.levels": "how many distinct floor depths the patches are picked from",
+    "basins.soft": "blur radius in tiles at the edges of a patch: 0 leaves a hard "
+                   "step between two floors",
+    "basins.amp": "how far a patch can sit below (or above) the open water around it",
+    "basins.seed": "different assignment of depths to patches",
     "regions.amp": "how far a region can sit above or below the base depth",
     "regions.octaves": "detail within the regional field",
     "regions.seed": "different arrangement of regions",
@@ -628,6 +641,66 @@ def f_regions(h, node, ctx):
     return np.clip(h + c, 0, 1).astype(np.float32), c.astype(np.float32)
 
 
+def f_basins(h, node, ctx):
+    """split open water into basins at its sills, one floor level each"""
+    import heapq
+    d = ctx["d"]
+    H, W = h.shape
+    # work on a coarse copy so the flood stays cheap on a full map
+    cs = max(2, int(round((H * W / 200000.0) ** 0.5)))
+    ch, cw = max(8, H // cs), max(8, W // cs)
+    ds = sc.box_blur(d, 30, 2)
+    coarse = np.array(Image.fromarray(ds, "F").resize((cw, ch), Image.BILINEAR))
+    peak = np.array(Image.fromarray(coarse, "F").filter(ImageFilter.MaxFilter(9)))
+    ys, xs = np.nonzero((coarse >= peak) & (coarse > float(node["threshold"])))
+    order = np.argsort(-coarse[ys, xs])
+    spacing = max(1.0, float(node["spacing"]) / cs)
+    seeds = []
+    for i in order:
+        y, x = ys[i], xs[i]
+        if all((y - py) ** 2 + (x - px) ** 2 > spacing ** 2 for py, px in seeds):
+            seeds.append((y, x))
+    if not seeds:
+        return h.copy(), np.zeros_like(h)
+
+    lab = np.zeros((ch, cw), np.int32)
+    heap = []
+    for k, (y, x) in enumerate(seeds, start=1):
+        lab[y, x] = k
+        heapq.heappush(heap, (-float(coarse[y, x]), y, x))
+    # flood from the deep points upward: two basins meet at the shallow sill
+    while heap:
+        _, y, x = heapq.heappop(heap)
+        k = lab[y, x]
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < ch and 0 <= nx < cw and lab[ny, nx] == 0:
+                lab[ny, nx] = k
+                heapq.heappush(heap, (-float(coarse[ny, nx]), ny, nx))
+
+    # the value comes from the basin's position on the map, not from its order
+    # in this crop, so a preview keeps its depths as you move around
+    reg = ctx.get("region") or {"x0": 0, "y0": 0}
+    sd = int(node.get("seed", 5))
+    vals = np.zeros(len(seeds) + 1, np.float32)
+    for k, (y, x) in enumerate(seeds, start=1):
+        hsh = ((int(reg["x0"]) + x * cs) * 73856093) ^ (int(reg["y0"]) + y * cs) * 19349663
+        vals[k] = ((hsh ^ (sd * 83492791)) & 0xFFFFFFFF) % 100003 / 100003.0
+    lv = max(1, int(node.get("levels", 4)))
+    if lv > 1:
+        vals = np.round(vals * lv) / lv
+    vals[0] = float(vals[1:].mean())          # unsplit water: no offset
+    shift = (vals[lab] - vals[1:].mean())
+    shift = np.array(Image.fromarray(shift.astype(np.float32), "F")
+                     .resize((W, H), Image.BILINEAR))
+    r = int(max(0.0, float(node.get("soft", 40.0))))
+    if r:
+        shift = sc.box_blur(shift, r, 2)
+    shift[ctx["land"]] = 0.0
+    c = (shift * float(node["amp"]) * mask_weight(node, ctx)).astype(np.float32)
+    return np.clip(h + c, 0, 1).astype(np.float32), c
+
+
 def f_blur(h, node, ctx):
     b = sc.box_blur(h, max(1, int(round(float(node["radius"])))), 2)
     # a wired mask limits the blur to that area instead of softening everything
@@ -670,6 +743,7 @@ FILTER_FN = {
     "noise": _as_filter(n_noise),
     "blur": f_blur,
     "regions": f_regions,
+    "basins": f_basins,
     "features": _as_filter(n_features),
     "erode": _as_filter(n_erode),
     "drainage": _as_filter(n_drainage),
@@ -700,7 +774,8 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
     global _cache
     region = region or STATE["region"]
     land, d = load_region(region, cancel=(lambda: check_cancel(gen)) if gen else None)
-    ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {}, "gen": gen}
+    ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {},
+           "gen": gen, "region": region}
     steps = [("distance", None), ("height", None)]
     steps += [(f["id"], f) for f in STATE["filters"]]
     steps += [("palette", None), ("coast", None), ("output", None)]
