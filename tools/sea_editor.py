@@ -1345,11 +1345,17 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
         prev_sig = chain_sig
-        want_planes = bool(node.get("overlay")) or (
-            STATE.get("channel", "").startswith(f"dbg:{nid}:"))
-        cached = _cache.get(nid) if (USE_CACHE and not want_planes) else None
-        if cached and cached[0] == chain_sig:
+        # debug planes live in the cache entry too, so an overlay does not force
+        # its node (and everything after it) to recompute on every edit
+        dbg_ctx = ctx.get("debug")
+        need_planes = dbg_ctx is not None and nid in dbg_ctx.ids
+        cached = _cache.get(nid) if USE_CACHE else None
+        hit = bool(cached and cached[0] == chain_sig
+                   and (not need_planes or (len(cached) > 2 and cached[2] is not None)))
+        if hit:
             val = cached[1]
+            if need_planes and len(cached) > 2 and cached[2]:
+                ctx["debug"][nid] = dict(cached[2])
         else:
             val, contrib = None, None
             if node.get("enabled", True):
@@ -1380,7 +1386,10 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                             and abs(c[1][0]) < 1e-6 and abs(c[1][1] - 1.0) < 1e-6):
                         val = np.interp(val, c[0], c[1]).astype(np.float32)
             if USE_CACHE:
-                _cache[nid] = (chain_sig, val)
+                planes = None
+            if need_planes:
+                planes = dict(ctx["debug"].get(nid, {})) or None
+            _cache[nid] = (chain_sig, val, planes)
         times[nid] = round((time.perf_counter() - t_node) * 1000.0, 1)
 
         if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
