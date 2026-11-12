@@ -46,14 +46,23 @@ window.__zzSea.on = true    // on
 
 ## Texture generator
 
-`tools/build_sea.py` rebuilds `dist/zigzag-sea.webp` (7749 × 5254, one pixel per
-map tile). The pipeline itself lives in `tools/sea_core.py`, shared with the crop
-renderer so the two can never drift. Needs numpy + Pillow:
+The shipped texture is built from a **saved editor preset**, over the whole map
+at one pixel per tile (7749 × 5254), in a single pass:
 
 ```bash
-python3 tools/build_sea.py     # ~3 min, writes dist/zigzag-sea.webp
-python3 tools/sea_crop.py      # ~20 s, 1550 x 1050 crop in out/sea/v2_crop.png
+python3 tools/build_dist.py                    # once: exact distance field, ~35 s
+python3 tools/sea_full.py <preset> --single    # ~80 s, writes out/sea/full_<preset>.png
+python3 -c "from PIL import Image; \
+  Image.open('out/sea/full_<preset>.png').convert('RGB').save('dist/zigzag-sea.webp', quality=92, method=6)"
 ```
+
+`--strips` still exists but bands at the seams: every filter is anchored to its
+crop, so a strip sees different noise, erosion and drainage than its neighbour.
+Use `--single`.
+
+`tools/build_sea.py` and `tools/sea_crop.py` are the older standalone pipeline
+(`sea_core.render_simple`) kept for quick look tests; they are **not** how the
+shipped texture is made.
 
 The first run downloads the map raster into `out/sea/` and caches the distance
 field there; later runs reuse them. Every value that affects the picture is in

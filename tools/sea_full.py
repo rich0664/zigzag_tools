@@ -47,9 +47,14 @@ def apply_preset(name):
             ed.STATE["nodes"][nid].update(params)
     if "masks" in data:
         ed.STATE["masks"] = data["masks"]
-    if "filters" in data:
-        ed.STATE["filters"] = data["filters"]
-    ed.STATE["next_filter"] = data.get("next_filter", len(ed.STATE["filters"]) + 1)
+    ed.STATE["filters"] = data.get("filters", [])
+    ed.normalise_filters(ed.STATE["filters"])
+    for f in ed.walk_filters(ed.STATE["filters"]):
+        if f.get("type") not in ed.FILTER_FN:
+            raise SystemExit(f"preset uses unknown filter type {f.get('type')!r}")
+    if data.get("world_noise") is not None:
+        ed.STATE["world_noise"] = data["world_noise"]
+    ed.STATE["next_filter"] = data.get("next_filter", 1)
     ed.STATE.setdefault("channel", "output")
 
 
@@ -61,13 +66,19 @@ def main():
                     help="1 = one pixel per map tile")
     ap.add_argument("--strip", type=int, default=STRIP_H)
     ap.add_argument("--margin", type=int, default=MARGIN)
-    ap.add_argument("--single", action="store_true",
-                    help="render the whole map in one pass (no strip seams, "
-                         "more memory)")
+    ap.add_argument("--strips", action="store_true",
+                    help="render in strips instead of one pass. Faster to "
+                         "interrupt, but every filter is anchored to its crop, "
+                         "so noise, erosion and drainage band at the seams")
+    ap.add_argument("--min-free-mb", type=int, default=900)
     args = ap.parse_args()
 
     apply_preset(args.preset)
     ed.USE_CACHE = False        # one pass needs each node once
+    free = ed.mem_available_mb()
+    if free is not None and free < args.min_free_mb:
+        raise SystemExit(f"only {free:.0f} MB free, need {args.min_free_mb} MB; "
+                         f"close something and retry")
     land_full = ed.load_map()
     H, W = land_full.shape
     out_w, out_h = int(round(W * args.scale)), int(round(H * args.scale))
@@ -98,7 +109,7 @@ def main():
     ed.load_region = load_region
     ed.STATE["region"] = {"x0": 0, "y0": 0, "w": out_w, "h": out_h, "scale": 1.0}
 
-    if args.single:
+    if not args.strips:
         t0 = time.time()
         last = [t0]
 

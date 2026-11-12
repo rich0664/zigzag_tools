@@ -126,6 +126,126 @@ def fbm(sx, sy, scale_tiles, octaves=5, gain=0.55, seed=0, px_per_tile=1.0):
     return out / total
 
 
+def _hash01(ix, iy, seed):
+    """deterministic 0..1 value for an integer lattice point"""
+    x = np.asarray(ix, dtype=np.int64)
+    y = np.asarray(iy, dtype=np.int64)
+    h = x * 374761393 + y * 668265263 + np.int64(int(seed) * 1442695041)
+    h = (h ^ (h >> 13)) * 1274126177
+    h = h ^ (h >> 16)
+    return ((h & 0xFFFFFF).astype(np.float32) / float(0xFFFFFF))
+
+
+def _smooth(t):
+    return t * t * (3.0 - 2.0 * t)
+
+
+def _quintic(t):
+    return t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+
+
+def value_noise(shape, ox, oy, px, cell, seed):
+    """value noise anchored to map coordinates, so a crop always agrees with
+    the full map: (ox, oy) is where the region starts, in tiles"""
+    h, w = shape
+    x = ox + (np.arange(w, dtype=np.float32) + 0.5) * px
+    y = oy + (np.arange(h, dtype=np.float32) + 0.5) * px
+    gx = x / cell
+    gy = y / cell
+    ix = np.floor(gx).astype(np.int64)[None, :]
+    iy = np.floor(gy).astype(np.int64)[:, None]
+    fx = _smooth(gx - np.floor(gx)).astype(np.float32)[None, :]
+    fy = _smooth(gy - np.floor(gy)).astype(np.float32)[:, None]
+    h00 = _hash01(ix, iy, seed)
+    h10 = _hash01(ix + 1, iy, seed)
+    h01 = _hash01(ix, iy + 1, seed)
+    h11 = _hash01(ix + 1, iy + 1, seed)
+    top = h00 + (h10 - h00) * fx
+    bot = h01 + (h11 - h01) * fx
+    return top + (bot - top) * fy
+
+
+def perlin_noise(shape, ox, oy, px, cell, seed):
+    """gradient noise, same anchoring as value_noise"""
+    h, w = shape
+    x = ox + (np.arange(w, dtype=np.float32) + 0.5) * px
+    y = oy + (np.arange(h, dtype=np.float32) + 0.5) * px
+    gx = x / cell
+    gy = y / cell
+    ix = np.floor(gx).astype(np.int64)[None, :]
+    iy = np.floor(gy).astype(np.int64)[:, None]
+    fx = (gx - np.floor(gx)).astype(np.float32)[None, :]
+    fy = (gy - np.floor(gy)).astype(np.float32)[:, None]
+    u = _quintic(fx)
+    v = _quintic(fy)
+    out = np.zeros(shape, np.float32)
+    for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+        ang = _hash01(ix + dx, iy + dy, seed) * 6.2831853
+        gxd, gyd = np.cos(ang), np.sin(ang)
+        ddx = fx - dx
+        ddy = fy - dy
+        dot = gxd * ddx + gyd * ddy
+        out += dot * ((u if dx else 1 - u) * (v if dy else 1 - v))
+    return np.clip(0.5 + 1.4 * out, 0, 1)
+
+
+def worley_noise(shape, ox, oy, px, cell, seed):
+    """cellular: distance to the nearest feature point in the 3x3 cells around"""
+    h, w = shape
+    x = (ox + (np.arange(w, dtype=np.float32) + 0.5) * px) / cell
+    y = (oy + (np.arange(h, dtype=np.float32) + 0.5) * px) / cell
+    gx = x[None, :]
+    gy = y[:, None]
+    ix = np.floor(gx).astype(np.int64)
+    iy = np.floor(gy).astype(np.int64)
+    best = np.full(shape, 9.0, np.float32)
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            jx = ix + dx
+            jy = iy + dy
+            pxx = jx + _hash01(jx, jy, seed)
+            pyy = jy + _hash01(jx, jy, seed + 7)
+            d = (pxx - gx) ** 2 + (pyy - gy) ** 2
+            best = np.minimum(best, np.broadcast_to(d, shape))
+    return np.clip(np.sqrt(best), 0, 1)
+
+
+NOISE_KINDS = ("value", "perlin", "worley", "ridged", "billow", "white")
+
+
+def noise_field(shape, ox, oy, px, cell, seed, kind="value"):
+    if kind == "perlin":
+        return perlin_noise(shape, ox, oy, px, cell, seed)
+    if kind == "worley":
+        return worley_noise(shape, ox, oy, px, cell, seed)
+    if kind == "white":
+        h, w = shape
+        iy = np.arange(h, dtype=np.int64)[:, None]
+        ix = np.arange(w, dtype=np.int64)[None, :] + int(ox)
+        return _hash01(ix, iy + int(oy), seed)
+    v = value_noise(shape, ox, oy, px, cell, seed)
+    if kind == "ridged":
+        return 1.0 - np.abs(2.0 * v - 1.0)
+    if kind == "billow":
+        return np.abs(2.0 * v - 1.0)
+    return v
+
+
+def fbm_world(shape, ox, oy, px, scale_tiles, octaves=5, gain=0.55, seed=0,
+              kind="value"):
+    """fbm anchored to the map grid: the same tiles look the same in a preview
+    and in a full render, and panning does not shift the pattern"""
+    out = np.zeros(shape, np.float32)
+    amp, total = 1.0, 0.0
+    cell = max(1e-3, float(scale_tiles))
+    for o in range(max(1, int(octaves))):
+        out += noise_field(shape, ox, oy, px, cell, seed + o * 131, kind) * amp
+        total += amp
+        amp *= gain
+        cell = max(1e-3, cell * 0.5)
+    return out / max(1e-6, total)
+
+
 def upscale(values, shape):
     return np.array(Image.fromarray(values.astype(np.float32), mode="F").resize(shape, Image.BICUBIC))
 
@@ -225,11 +345,14 @@ def window_dist(mask, w):
     return out
 
 
-def slab_erode(h, window=3, layers=24, cancel=None):
+def slab_erode(h, window=3, layers=24, cancel=None, lo=None, hi=None):
     """Hatchling's slab erosion (proceduralpixels "fastest erosion algorithm"):
     per threshold, distance to the nearest in/out-of-threshold texel inside a
     small window, remapped to a linear step, accumulated over layers."""
-    lo, hi = float(h.min()), float(h.max())
+    if lo is None:
+        lo = float(h.min())
+    if hi is None:
+        hi = float(h.max())
     acc = np.zeros(h.shape, dtype=np.float32)
     for i in range(layers):
         if cancel is not None:

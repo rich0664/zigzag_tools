@@ -40,7 +40,8 @@ _version = 0
 _png = None
 _render = {"running": False, "stage": 0, "total": 0, "node": "",
            "started": 0.0, "elapsed": 0.0, "stamp": 0, "last_ms": 0.0,
-           "error": None, "auto": False, "times": {}, "ov_stamp": 0}
+           "error": None, "auto": False, "times": {}, "ov_stamp": 0,
+           "ov_running": False, "ov_error": None}
 
 
 # --------------------------------------------------------------------------
@@ -51,11 +52,11 @@ def default_state():
         "region": {"x0": 2800, "y0": 2150, "w": 1200, "h": 800, "scale": 1.0},
         "channel": "output",
         "overlay_map": False,
-        "fast": False,
+        "world_noise": False,
         "nodes": {
             "distance": dict(enabled=True, down=2),
             "height": dict(enabled=True, mode="profile", deep_dist=1600.0,
-                           curve=1.0, shelf_t=0.10, slope_t=0.32, abyss_t=1.0,
+                           curve=1.0, shelf_t=0.10, slope_t=0.32,
                            out_curve=[[0, 0], [1, 1]]),
             "palette": dict(enabled=True,
                             stops=[0.0, 0.03, 0.07, 0.12, 0.20, 0.32, 0.46, 0.66, 1.0],
@@ -74,11 +75,11 @@ def default_state():
         "next_filter": 2,
         "masks": {
             "depth_band": dict(source="height", tap="", scale=400, lo=0.15, hi=0.70,
-                               feather=0.1, invert=False),
+                               invert=False),
             "open_water": dict(source="distance", tap="", scale=400, lo=40, hi=160,
-                               feather=1.0, invert=False),
+                               invert=False),
             "big_noise": dict(source="noise", tap="", scale=900, lo=0.3, hi=0.7,
-                              feather=1.0, invert=False),
+                              invert=False),
         },
     }
 
@@ -87,7 +88,7 @@ STATE_PATH = os.path.join(WORK, "editor_state.json")
 
 
 STATE_KEYS = ("region", "channel", "overlay_map", "nodes", "masks", "next_mask",
-              "filters", "next_filter")
+              "filters", "next_filter", "world_noise")
 
 
 def save_state():
@@ -106,13 +107,31 @@ def load_state():
     try:
         with open(STATE_PATH) as f:
             data = json.load(f)
-        for k in STATE_KEYS:
-            if k in data:
-                STATE[k] = data[k]
-        STATE.setdefault("next_filter", len(STATE.get("filters", [])) + 1)
-        normalise_filters(STATE.get("filters", []))
-    except Exception:
-        pass
+    except FileNotFoundError:
+        return
+    except Exception as exp:
+        print("state file unreadable, starting from defaults:", exp, flush=True)
+        return
+    base = default_state()
+    for k in ("nodes", "masks"):
+        if k in data and isinstance(data[k], dict):
+            for nid, params in data[k].items():
+                if nid in base[k] and isinstance(params, dict):
+                    base[k][nid].update(params)
+                else:
+                    base[k][nid] = params
+        STATE[k] = base[k]
+    for k in ("region", "channel", "overlay_map", "next_mask", "next_filter",
+              "world_noise", "filters"):
+        if k in data:
+            STATE[k] = data[k]
+    normalise_filters(STATE.get("filters", []))
+    STATE["next_filter"] = max(
+        [int(f["id"][1:]) for f in walk_filters(STATE.get("filters", []))
+         if f.get("id", "").startswith("f") and f["id"][1:].isdigit()] + [0]) + 1
+    STATE["next_mask"] = max(
+        [int(k.split("_")[1]) for k in STATE.get("masks", {})
+         if k.startswith("mask_") and k.split("_")[1].isdigit()] + [0]) + 1
 
 
 BLEND_MODES = ["add", "multiply", "lighter", "darker"]
@@ -121,19 +140,20 @@ OVERLAY_DEFAULTS = dict(overlay="", ov_density=26, ov_length=14,
                         ov_colour="255,205,120")
 
 FILTER_DEFS = {
-    "warp": dict(tiles=20.0, scale=700, seed=34),
-    "noise": dict(amp=0.15, scale=350, octaves=4, seed=11, blend="add"),
+    "warp": dict(kind="value", tiles=20.0, scale=700, seed=34),
+    "noise": dict(kind="value", amp=0.15, scale=350, octaves=4, seed=11,
+                  blend="add"),
     "blur": dict(radius=2),
-    "features": dict(amp=0.12, scale=70, density=0.70, octaves=4, seed=9,
-                     blend="add"),
-    "erode": dict(window=6, layers=20, mix=1.0, blend="add"),
+    "features": dict(kind="value", amp=0.12, scale=70, density=0.70,
+                     octaves=4, seed=9, blend="add"),
+    "erode": dict(window=6, layers=20, mix=1.0, auto_range=False, blend="add"),
     "drainage": dict(scale=4, steps=4, k=2.0, m=0.5, n=1.0, cap=0.15,
                      strength=1.0, blend="add"),
     "shelf": dict(gain=1.0, power=1.0, blend="add"),
     # regional base level: low-frequency field, optionally quantised into
     # terraces, added to the height so whole areas sit at different depths
-    "regions": dict(scale=2500.0, octaves=3, levels=3, soft=0.45, amp=0.35,
-                    seed=7, blend="add"),
+    "regions": dict(kind="value", scale=2500.0, octaves=3, levels=3, soft=0.45,
+                    amp=0.35, seed=7, blend="add"),
     # one floor depth per open patch: the sea is split at the sills between
     # deep points, and each patch gets its own level
     "basins": dict(threshold=60.0, spacing=120.0, levels=4, soft=40.0,
@@ -155,7 +175,19 @@ DESC = {
                      "shallows), <1 keeps shallow water wide and drops off later",
     "height.shelf_t": "profile mode: fraction of deep_dist that is flat shelf",
     "height.slope_t": "profile mode: fraction of deep_dist where the shelf break happens",
-    "height.abyss_t": "profile mode: unused end marker for the abyssal plain",
+    "noise.kind": "value = smooth blobs; perlin = soft gradients; worley = "
+                  "cellular plates and cracks; ridged = sharp ridges (1-|2n-1|); "
+                  "billow = rounded lumps (|2n-1|); white = per-pixel grain",
+    "features.kind": "value = blobs; perlin = gradients; worley = cellular "
+                     "plates; ridged = creases; billow = lumps; white = grain",
+    "regions.kind": "value = blobs; perlin = gradients; worley = cells; "
+                    "ridged = creases; billow = lumps",
+    "warp.kind": "value = smooth displacement; worley = blockier; white = grain",
+    "erode.auto_range": "on = normalise to this crop's own min/max (the old "
+                        "behaviour, which makes the same place erode differently "
+                        "in every crop); off = treat the field as 0..1",
+    "mask.seed": "different noise for this mask, so two noise masks can be "
+                 "independent",
     "noise.amp": "how much the noise adds to the height (0.1 is subtle, 0.4 is strong)",
     "noise.scale": "noise feature size in tiles: small = fine grain, large = broad swells",
     "noise.octaves": "number of noise octaves; each adds finer detail",
@@ -229,10 +261,12 @@ DESC = {
     "regions.octaves": "detail within the regional field",
     "regions.seed": "different arrangement of regions",
     "coast.strength": "how strongly the coastal tint is mixed in",
-    "blend": "how this filter's contribution meets the height under it: "
-             "add = height + contribution; multiply = height x (1 + contribution), "
-             "so it fades out where the water is already deep or shallow; "
-             "lighter = only the brightening part; darker = only the deepening part",
+    "blend": "how this filter's contribution meets the height under it. Every "
+             "mode is the identity when the contribution is zero. add = h + c; "
+             "subtract = h - c; multiply = h x (1 + c), so it fades out where "
+             "the water is already deep or shallow; screen = h + c(1-h); "
+             "overlay = strongest in the mid depths; lighter = the brightening "
+             "half only; darker = the deepening half only",
     "coast.r": "coastal tint red", "coast.g": "coastal tint green", "coast.b": "coastal tint blue",
     "output.land_t": "depth shown under the land tiles (0 = shallowest colour)",
     "mask.source": "what the mask reads: height (of the tapped node), distance, or noise",
@@ -240,7 +274,6 @@ DESC = {
     "mask.scale": "noise feature size when the source is noise",
     "mask.lo": "mask starts rising above this value",
     "mask.hi": "mask is fully on at this value",
-    "mask.feather": "not used yet: the edge softness comes from lo/hi",
     "mask.invert": "flip the mask",
 }
 
@@ -266,8 +299,9 @@ MIN_FREE_MB = 800
 
 
 def region_pixels(r):
+    """render cost is one pixel per tile whatever the display scale is"""
     try:
-        return int(r["w"]) * int(r["h"]) * float(r.get("scale", 1.0)) ** 2
+        return int(r["w"]) * int(r["h"])
     except Exception:
         return 0
 
@@ -442,10 +476,11 @@ def map_rgba():
 
 def load_region(region, cancel=None):
     full = load_map()
-    s = float(region.get("scale", 1.0))
+    # always sampled at one pixel per tile; `scale` only downsamples the result,
+    # so a half-res preview shows more area instead of a magnified corner
     x0, y0 = int(region["x0"]), int(region["y0"])
-    w = max(32, int(int(region["w"]) * s))
-    h = max(32, int(int(region["h"]) * s))
+    w = max(32, int(int(region["w"])))
+    h = max(32, int(int(region["h"])))
     margin = 200
     H, W = full.shape
     xs = max(0, x0 - margin)
@@ -468,9 +503,6 @@ def sig(*parts):
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=float).encode()).hexdigest()[:16]
 
 
-def box2(a):
-    return sc.box_blur(a, 1, 1)
-
 
 def sorted_curve(pts):
     """control points as strictly increasing x in [0,1]; None if unusable"""
@@ -490,23 +522,55 @@ def sorted_curve(pts):
     return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.float32)
 
 
+BLEND_MODES = ["add", "subtract", "multiply", "screen", "overlay",
+               "lighter", "darker"]
+
+
 def blend_into(h, c, mode):
-    """combine a filter's contribution with the height under it"""
-    if mode == "multiply":     # scales with the current height, sign preserved
+    """combine a filter's contribution with the height under it.
+
+    Every mode is the identity when c == 0, which is what makes a filter with a
+    zero contribution a no-op however it is blended."""
+    if mode in ("multiply", "scale"):   # scales with the height already there
         return np.clip(h * (1.0 + c), 0, 1).astype(np.float32)
-    if mode == "lighter":      # only the brightening part
+    if mode == "subtract":              # the inverse of add
+        return np.clip(h - c, 0, 1).astype(np.float32)
+    if mode == "screen":                # add, but saturating
+        return np.clip(h + c * (1.0 - h), 0, 1).astype(np.float32)
+    if mode == "overlay":               # strongest in the mid-tones
+        k = np.where(h < 0.5, 2.0 * h, 2.0 * (1.0 - h))
+        return np.clip(h + c * k, 0, 1).astype(np.float32)
+    if mode in ("lighter", "lighten"):  # only the brightening part
         return np.clip(h + np.maximum(c, 0.0), 0, 1).astype(np.float32)
-    if mode == "darker":       # only the darkening part
+    if mode in ("darker", "darken"):    # only the darkening part
         return np.clip(h + np.minimum(c, 0.0), 0, 1).astype(np.float32)
     return np.clip(h + c, 0, 1).astype(np.float32)
 
 
 def apply_curve(delta, pts):
+    """shape the magnitude of a signed contribution.
+
+    y(0) is subtracted so the curve stays continuous through zero: without it a
+    curve that does not pass through (0,0) injects a step at every sign change."""
     c = sorted_curve(pts)
     if c is None:
         return delta
     xs, ys = c
-    return np.sign(delta) * np.interp(np.abs(delta), xs, ys).astype(np.float32)
+    y0 = float(np.interp(0.0, xs, ys))
+    shaped = np.interp(np.abs(delta), xs, ys) - y0
+    return (np.sign(delta) * shaped).astype(np.float32)
+
+
+def noise2d(shape, ctx, scale, octaves, seed, kind="value"):
+    """fbm for a region: world-anchored when the flag is on, crop-anchored
+    (the old behaviour) when it is off"""
+    if STATE.get("world_noise"):
+        reg = ctx.get("region") or {"x0": 0, "y0": 0, "scale": 1.0}
+        return sc.fbm_world(shape, float(reg["x0"]), float(reg["y0"]), 1.0,
+                            max(1.0, float(scale)), int(octaves),
+                            seed=int(seed), kind=kind)
+    return sc.fbm(shape[1], shape[0], max(1.0, float(scale)),
+                  max(1, int(octaves)), seed=int(seed))
 
 
 def mask_field(mask, ctx, fallback=None):
@@ -519,8 +583,8 @@ def mask_field(mask, ctx, fallback=None):
         if v is None:
             v = fallback if fallback is not None else ctx["h"]
     else:
-        v = sc.fbm(ctx["d"].shape[1], ctx["d"].shape[0], max(8.0, float(mask["scale"])),
-                   4, seed=int(mask.get("seed", 3)))
+        v = noise2d(ctx["d"].shape, ctx, max(8.0, float(mask["scale"])), 4,
+                    int(mask.get("seed", 3)), mask.get("kind", "value"))
     lo, hi = float(mask["lo"]), float(mask["hi"])
     t = sc.smoothstep((v - lo) / max(1e-6, hi - lo))
     return 1.0 - t if mask["invert"] else t
@@ -575,19 +639,6 @@ def mask_weight(node, ctx, nid=None):
 # --------------------------------------------------------------------------
 # nodes
 # --------------------------------------------------------------------------
-def n_distance(node, ctx, prev_sig):
-    return ctx["d"], None
-
-
-def n_warp(node, ctx, prev_sig):
-    d = ctx["d"]
-    H, W = d.shape
-    w1 = (sc.fbm(W, H, float(node["scale"]), 3, seed=21) - 0.5) * float(node["tiles"])
-    w2 = (sc.fbm(W, H, float(node["scale"]), 3, seed=22) - 0.5) * float(node["tiles"])
-    yi, xi = np.mgrid[0:H, 0:W]
-    out = d[np.clip((yi + w1).astype(np.int32), 0, H - 1),
-            np.clip((xi + w2).astype(np.int32), 0, W - 1)]
-    return out.astype(np.float32), None
 
 
 def n_height(node, ctx, prev_sig):
@@ -609,7 +660,8 @@ def n_height(node, ctx, prev_sig):
 def n_noise(node, ctx, prev_sig):
     h = ctx["h"]
     H, W = h.shape
-    n = sc.fbm(W, H, float(node["scale"]), int(node["octaves"]), seed=int(node["seed"])) - 0.5
+    n = noise2d(h.shape, ctx, float(node["scale"]), int(node["octaves"]),
+                int(node["seed"]), node.get("kind", "value")) - 0.5
     w = mask_weight(node, ctx) * float(node["amp"])
     c = 2.0 * w * n
     dbg = ctx.get("debug")
@@ -624,7 +676,8 @@ def n_noise(node, ctx, prev_sig):
 def n_features(node, ctx, prev_sig):
     h = ctx["h"]
     H, W = h.shape
-    n = sc.fbm(W, H, float(node["scale"]), int(node["octaves"]), seed=int(node["seed"]))
+    n = noise2d(h.shape, ctx, float(node["scale"]), int(node["octaves"]),
+                int(node["seed"]), node.get("kind", "value"))
     bumps = np.clip((n - float(node["density"])) / max(1e-3, 1.0 - float(node["density"])), 0, 1) ** 1.6
     w = mask_weight(node, ctx) * float(node["amp"])
     c = w * bumps
@@ -649,8 +702,10 @@ def n_erode(node, ctx, prev_sig):
     H, W = h.shape
     SW, SH = max(8, int(W * p)), max(8, int(H * p))
     hs = np.array(Image.fromarray(h, mode="F").resize((SW, SH), Image.BICUBIC))
+    auto = bool(node.get("auto_range", False))
     he = sc.slab_erode(hs, window=max(2, int(round(float(node["window"]) * p))),
-                       layers=int(node["layers"]), cancel=_canceller(ctx))
+                       layers=int(node["layers"]), cancel=_canceller(ctx),
+                       lo=None if auto else 0.0, hi=None if auto else 1.0)
     he = sc.upscale(he, (W, H))
     mix = float(node["mix"]) * mask_weight(node, ctx)
     out = np.clip(h * (1 - mix) + he * mix, 0, 1)
@@ -671,17 +726,6 @@ def n_shelf(node, ctx, prev_sig):
             if not np.isscalar(gain) else np.full(h.shape, float(gain), np.float32)
     return out, out - h
 
-
-def n_shade(node, ctx, prev_sig):
-    h = ctx["h"]
-    hh = box2(h)
-    gy, gx = np.gradient(hh)
-    nrm = np.sqrt(gx * gx + gy * gy + 1.0)
-    Lv = np.array([-0.5, -0.6, 0.62]); Lv /= np.linalg.norm(Lv)
-    sh = (-gx * Lv[0] - gy * Lv[1] + Lv[2]) / nrm
-    ctx["shade"] = np.clip(1.0 + float(node["amp"]) * (sh - 0.62),
-                           float(node["lo"]), float(node["hi"]))
-    return h, None
 
 
 def palette_arrays(node):
@@ -815,8 +859,9 @@ def n_drainage(node, ctx, prev_sig):
 def f_warp(h, node, ctx):
     H, W = h.shape
     sc_t = float(node["scale"])
-    w1 = (sc.fbm(W, H, sc_t, 3, seed=int(node["seed"])) - 0.5) * float(node["tiles"])
-    w2 = (sc.fbm(W, H, sc_t, 3, seed=int(node["seed"]) + 1) - 0.5) * float(node["tiles"])
+    kind = node.get("kind", "value")
+    w1 = (noise2d(h.shape, ctx, sc_t, 3, int(node["seed"]), kind) - 0.5) * float(node["tiles"])
+    w2 = (noise2d(h.shape, ctx, sc_t, 3, int(node["seed"]) + 1, kind) - 0.5) * float(node["tiles"])
     # float row/column vectors broadcast to int32 indices: same pixels as a
     # full int64 mgrid for about a third of the memory
     yf = np.arange(H, dtype=np.float32)[:, None]
@@ -839,8 +884,9 @@ def f_warp(h, node, ctx):
 
 def f_regions(h, node, ctx):
     H, W = h.shape
-    n = sc.fbm(W, H, max(8.0, float(node["scale"])),
-               int(node.get("octaves", 3)), seed=int(node.get("seed", 7)))
+    n = noise2d(h.shape, ctx, max(8.0, float(node["scale"])),
+                int(node.get("octaves", 3)), int(node.get("seed", 7)),
+                node.get("kind", "value"))
     raw_field = n.copy()
     lv = max(1, int(node.get("levels", 3)))
     # soft = width of the ramp between two levels, as a fraction of a level:
@@ -871,8 +917,11 @@ def f_basins(h, node, ctx):
     import heapq
     d = ctx["d"]
     H, W = h.shape
-    # work on a coarse copy so the flood stays cheap on a full map
-    cs = max(2, int(round((H * W / 200000.0) ** 0.5)))
+    # a fixed cell size on the map grid: the same place gets the same zones
+    # whatever crop you are looking at
+    cs = BASIN_CS
+    reg = ctx.get("region") or {"x0": 0, "y0": 0}
+    x0, y0 = int(reg["x0"]), int(reg["y0"])
     ch, cw = max(8, H // cs), max(8, W // cs)
     ds = sc.box_blur(d, 30, 2)
     coarse = np.array(Image.fromarray(ds, "F").resize((cw, ch), Image.BILINEAR))
@@ -905,11 +954,10 @@ def f_basins(h, node, ctx):
 
     # the value comes from the basin's position on the map, not from its order
     # in this crop, so a preview keeps its depths as you move around
-    reg = ctx.get("region") or {"x0": 0, "y0": 0}
     sd = int(node.get("seed", 5))
     vals = np.zeros(len(seeds) + 1, np.float32)
     for k, (y, x) in enumerate(seeds, start=1):
-        hsh = ((int(reg["x0"]) + x * cs) * 73856093) ^ (int(reg["y0"]) + y * cs) * 19349663
+        hsh = ((x0 + x * cs) * 73856093) ^ (y0 + y * cs) * 19349663
         vals[k] = ((hsh ^ (sd * 83492791)) & 0xFFFFFFFF) % 100003 / 100003.0
     lv = max(1, int(node.get("levels", 4)))
     if lv > 1:
@@ -1067,8 +1115,9 @@ def apply_filter(filt, ctx, h, times=None):
     if contrib is None:                 # warp/blur transform the field itself
         contrib = val - h
     # debug view: what this filter actually adds, before blending
-    ctx.setdefault("debug", {}).setdefault(filt["id"], {})["contribution"] = \
-        np.asarray(contrib, dtype=np.float32).copy()
+    if ctx.get("debug") is not None:
+        ctx["debug"].setdefault(filt["id"], {})["contribution"] = \
+            np.asarray(contrib, dtype=np.float32).copy()
     pts = filt.get("out_curve")
     if pts and len(pts) >= 2:
         contrib = apply_curve(contrib, pts)
@@ -1076,6 +1125,8 @@ def apply_filter(filt, ctx, h, times=None):
         if ch.get("enabled", True):
             contrib = apply_filter(ch, ctx, contrib, times)
     out = blend_into(h, contrib, filt.get("blend", "add"))
+    if isinstance(out, np.ndarray):
+        ctx.setdefault("fields", {})[filt["id"]] = out
     if times is not None:
         times[filt["id"]] = round((time.perf_counter() - t0) * 1000.0, 1)
     return out
@@ -1102,8 +1153,6 @@ FILTER_FN = {
     "shelf": _as_filter(n_shelf),
 }
 
-SCALAR_NODES = {"height", "noise", "features", "erode", "drainage", "shelf"}
-
 # what each node consumes and produces, shown in the node list
 NODE_IO = {
     "distance": ("land", "distance"),
@@ -1122,12 +1171,25 @@ NODE_IO = {
 
 
 
+SIG_SKIP = ("name", "overlay", "ov_density", "ov_length", "ov_colour")
+
+
+def _field_keys(node):
+    """the part of a filter that can change its output (children included)"""
+    if isinstance(node, dict):
+        return {k: _field_keys(v) for k, v in node.items() if k not in SIG_SKIP}
+    if isinstance(node, list):
+        return [_field_keys(v) for v in node]
+    return node
+
+
 def evaluate(progress=None, stop_at=None, region=None, gen=0):
     global _cache
     region = region or STATE["region"]
     land, d = load_region(region, cancel=(lambda: check_cancel(gen)) if gen else None)
+    want_debug = bool(STATE.get("_want_debug"))
     ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {},
-           "gen": gen, "region": region, "debug": {}}
+           "gen": gen, "region": region, "debug": {} if want_debug else None}
     steps = [("distance", None), ("height", None)]
     steps += [(f["id"], f) for f in STATE["filters"]]
     steps += [("palette", None), ("coast", None), ("output", None)]
@@ -1148,8 +1210,11 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
         node = filt if filt is not None else STATE["nodes"][nid]
         t_node = time.perf_counter()
 
-        chain_sig = sig(prev_sig, nid, node,
-                        [STATE["masks"][m] for m in node.get("masks", [])
+        sub_masks = set()
+        for n_ in walk_filters([node]):
+            sub_masks.update(n_.get("masks") or [])
+        chain_sig = sig(prev_sig, nid, _field_keys(node),
+                        [STATE["masks"][m] for m in sorted(sub_masks)
                          if m in STATE["masks"]],
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
@@ -1189,16 +1254,23 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                 _cache[nid] = (chain_sig, val)
         times[nid] = round((time.perf_counter() - t_node) * 1000.0, 1)
 
-        if (isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2
-                and nid in tapped):
-            ctx["fields"][nid] = val
+        if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
+            if nid == "height":
+                ctx["fields"]["base"] = val      # the height field, untapped
+            if nid in tapped or nid == "height":
+                ctx["fields"][nid] = val
         if nid == "distance":
             ctx["d"] = val if val is not None else ctx["d"]
         elif nid == "height" or filt is not None:
             if val is not None:
                 ctx["h"] = val
         elif nid == "palette":
-            ctx["color"] = val if val is not None else np.zeros((*land.shape, 3), np.float32)
+            if val is not None:
+                ctx["color"] = val
+            else:   # disabled: fall back to a grey ramp of the height
+                hv = ctx["h"] if ctx["h"] is not None else np.zeros(land.shape, np.float32)
+                g = np.clip(hv, 0, 1) * 255.0
+                ctx["color"] = np.stack([g, g, g], -1).astype(np.float32)
         elif nid == "coast":
             if val is not None:
                 ctx["color"] = val
@@ -1211,6 +1283,8 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
     ctx["times"] = times
     return ctx
 
+
+BASIN_CS = 16          # coarse cell for basin detection, in tiles
 
 DEBUG_LABELS = {
     "contribution": "add / remove",
@@ -1310,9 +1384,9 @@ def channel_image(ctx, channel):
 
 OVERLAY_KINDS = {
     "currents": ("flow", "zones", "speed"),
-    "drainage": ("flow", "accum"),
+    "drainage": ("flow",),
     "warp": ("vectors",),
-    "basins": ("zones", "floor"),
+    "basins": ("zones",),
     "regions": ("contours",),
     "noise": ("contours",),
     "features": ("contours",),
@@ -1465,6 +1539,51 @@ def _progress(gen, stage, total, node):
                        elapsed=round(time.time() - _render["started"], 2))
 
 
+LIMITS = {
+    ("height", "deep_dist"): (1.0, 20000.0),
+    ("height", "curve"): (0.01, 20.0),
+    ("height", "shelf_t"): (0.0, 0.98),
+    ("height", "slope_t"): (0.01, 1.0),
+    ("noise", "octaves"): (1, 8),
+    ("noise", "scale"): (1.0, 20000.0),
+    ("features", "octaves"): (1, 8),
+    ("features", "scale"): (1.0, 20000.0),
+    ("erode", "layers"): (1, 200),
+    ("erode", "window"): (1, 40),
+    ("basins", "levels"): (1, 12),
+    ("basins", "threshold"): (1.0, 5000.0),
+    ("currents", "reach"): (1.0, 2000.0),
+    ("currents", "travel"): (1, 400),
+    ("currents", "conserve"): (0.0, 1.0),
+    ("currents", "direction"): (0.0, 1.0),
+    ("currents", "deflect"): (0.0, 1.0),
+    ("currents", "speed_bias"): (0.0, 1.0),
+    ("regions", "levels"): (1, 24),
+    ("shelf", "power"): (0.05, 8.0),
+    ("coast", "strength"): (0.0, 1.0),
+}
+
+
+def _clamp_param(nid, node, key, val):
+    """keep UI-reachable values inside the range the math can survive"""
+    if key == "all" and isinstance(val, dict):
+        return key, {k: _clamp_param(nid, node, k, v)[1] for k, v in val.items()}
+    t = nid or (node or {}).get("type")
+    rng = LIMITS.get((t, key))
+    if rng and isinstance(val, (int, float)) and not isinstance(val, bool):
+        val = type(val)(min(rng[1], max(rng[0], val)))
+    if (t, key) == ("height", "slope_t") and node is not None:
+        val = max(float(val), float(node.get("shelf_t", 0.0)) + 0.01)
+    return key, val
+
+
+def _wants_debug():
+    ch = STATE.get("channel", "")
+    if ch.startswith("dbg:"):
+        return True
+    return any(f.get("overlay") for f in walk_filters(STATE["filters"]))
+
+
 def render_now(gen=None):
     """render the current state into the in-memory PNG"""
     global _png, _overlay
@@ -1487,15 +1606,15 @@ def render_now(gen=None):
         ch = STATE.get("channel", "output")
         stop = STATE["masks"][ch].get("tap") if ch in STATE["masks"] else None
         region = dict(STATE["region"])
-        fast = bool(STATE.get("fast"))
-        if fast:
-            region["scale"] = float(region.get("scale", 1.0)) * 0.5
+        STATE["_want_debug"] = _wants_debug()
         ctx = evaluate(lambda i, t, n: _progress(gen, i, t, n),
                        stop_at=stop or None, region=region, gen=gen)
         rgb = channel_image(ctx, ch)
-        if fast:      # keep the display size stable
-            out_w, out_h = int(STATE["region"]["w"]), int(STATE["region"]["h"])
-            rgb = np.array(Image.fromarray(rgb, "RGB").resize((out_w, out_h), Image.NEAREST))
+        sc_ = float(STATE["region"].get("scale", 1.0))
+        if abs(sc_ - 1.0) > 1e-6:
+            out_w = max(32, int(round(rgb.shape[1] * sc_)))
+            out_h = max(32, int(round(rgb.shape[0] * sc_)))
+            rgb = np.array(Image.fromarray(rgb, "RGB").resize((out_w, out_h), Image.LANCZOS))
         # the real map is a separate overlay layer in the browser, so it can
         # follow a drag without waiting for the sea render
         buf = io.BytesIO()
@@ -1507,16 +1626,17 @@ def render_now(gen=None):
         _render["times"] = ctx.get("times", {})
         try:
             _overlay = overlay_png(ctx) if is_current(gen) else None
-            if _overlay is not None:
-                _render["ov_stamp"] += 1     # tell the client to reload it too
+            _render["ov_stamp"] += 1       # reload it, or clear it when None
         except Exception as exp:
             _overlay = None
-            print("overlay failed:", exp, flush=True)
+            print("overlay failed:", str(exp) or type(exp).__name__, flush=True)
+            _render["ov_stamp"] += 1
     except _Cancelled:
         return False
     except Exception as exp:
         if is_current(gen):
-            _render["error"] = str(exp)
+            _render["error"] = str(exp) or type(exp).__name__
+        return False
     finally:
         if is_current(gen):
             _render.update(running=False, last_ms=int((time.time() - t0) * 1000),
@@ -1528,15 +1648,21 @@ def render_overlay_now():
     """rebuild just the overlay: cached nodes are reused, so this is cheap
     unless a filter with an overlay has to run"""
     global _overlay
+    _render["ov_running"] = True
     try:
+        STATE["_want_debug"] = True
         ctx = evaluate(region=dict(STATE["region"]))
         ov = overlay_png(ctx)
     except _Cancelled:
+        _render["ov_running"] = False
         return False
     except Exception as exp:
-        _render["ov_error"] = str(exp)
-        print("overlay failed:", exp, flush=True)
+        _render["ov_error"] = str(exp) or type(exp).__name__
+        print("overlay failed:", _render["ov_error"], flush=True)
+        _render["ov_running"] = False
         return False
+    finally:
+        _render["ov_running"] = False
     with _lock:
         _overlay = ov
         _render["ov_stamp"] += 1
@@ -1619,10 +1745,11 @@ input.off,select.off{opacity:.38}
     w<input id=rw type=number size=5> h<input id=rh type=number size=5>
     <button id=zin title="zoom in: halve the crop, centred">+</button>
     <button id=zout title="zoom out: double the crop, centred">&minus;</button>
-    <select id=scale><option value=1>1 px/tile<option value=0.5>0.5 px/tile</select>
+    <select id=scale title="how many pixels per tile the preview is drawn at; the render is always 1:1"><option value=1>1 px/tile<option value=0.5>0.5 px (more area)</select>
     <select id=chan></select>
     <button id=go>render</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
+    <label style="display:inline;color:var(--t)" title="anchor noise to the map instead of the crop: previews then match a full render, at the cost of changing how existing presets look"><input id=wnoise type=checkbox> world noise</label>
     <select id=presets style="width:auto;min-width:90px"></select>
     <button id=load>load</button><button id=save>save</button>
     <button id=del title="delete the selected save">×</button><button id=reset>reset</button>
@@ -1632,7 +1759,7 @@ input.off,select.off{opacity:.38}
     <img id=ovl draggable=false></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
-  <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div>
+  <div id=curvewrap></div><h3 id=wiredH>masks wired</h3><div id=wired></div>
   <div id=ovparams></div></div>
 <script>
 let S=null, sel=null, lastStamp=-1, lastOv=-1, curveDrag=null, panDrag=null;
@@ -1644,13 +1771,17 @@ async function poll(){
   if(polling){pollAgain=true;return;}
   polling=true;
   try{
-    const s=await api('/api/status');
+    let s;
+    try{ s=await api('/api/status'); }
+    catch(e){ setTimeout(poll,400); return; }
     const pct=s.running&&s.total?Math.round(100*s.stage/s.total):100;
     document.getElementById('bar').style.width=pct+'%';
     document.getElementById('prog').textContent=s.running
       ?`${s.node} ${s.stage}/${s.total} ${Number(s.elapsed).toFixed(1)}s`
       :(s.error?('error: '+s.error)
-        :(imgBusy?'loading image…':(s.last_ms?`${s.last_ms} ms`:'idle')));
+        :(s.ov_error?('overlay: '+s.ov_error)
+          :(imgBusy?'loading image…':(s.ov_running?'overlay…'
+            :(s.last_ms?`${s.last_ms} ms`:'idle')))));
     paintTimes(s.times||{});
     if((s.ov_stamp||0)!==lastOv){
       lastOv=s.ov_stamp||0;
@@ -1670,7 +1801,7 @@ async function poll(){
       im.style.transform='none';
       syncMap();
     }
-    if(s.running)setTimeout(poll,250);
+    if(s.running||s.ov_running)setTimeout(poll,250);
   }finally{
     polling=false;
     if(pollAgain){pollAgain=false;setTimeout(poll,120);}
@@ -1697,6 +1828,7 @@ function syncMap(){
 async function boot(){
   S=await api('/api/state'); window.DESC=S.desc||{};
   document.getElementById('auto').checked=!!S.auto;
+  document.getElementById('wnoise').checked=!!S.world_noise;
   syncMap();
   applyRegion(S.region);
   renderTop(); renderNodes(); renderMasks();
@@ -1793,10 +1925,11 @@ async function select(id){sel=id; await api('/api/select',{id});
   document.getElementById('nodeTitle').textContent=f?fLabel(f):mLabel(id);
   renderParams(); renderNodes(); renderMasks();}
 const OVERLAY_KINDS={
-  currents:['flow','zones','speed'], drainage:['flow','accum'], warp:['vectors'],
-  basins:['zones','floor'], regions:['contours'], noise:['contours'],
+  currents:['flow','zones','speed'], drainage:['flow'], warp:['vectors'],
+  basins:['zones'], regions:['contours'], noise:['contours'],
   features:['contours'], blur:['contours'], erode:['contours'], shelf:['contours']
 };
+const OVERLAY_DENSITY_KINDS=['flow','vectors'];
 const CHOICES={
   'nodes.height.mode':['profile','ramp'],
   'nodes.distance.down':['1','2']
@@ -1807,20 +1940,37 @@ function inactiveParam(kind,id,k,o){
   if(!o) return false;
   if(kind==='nodes'){
     if(id==='height'){
-      if(k==='abyss_t') return true;          // no code path reads it
+
       if(k==='shelf_t'||k==='slope_t') return o.mode!=='profile';
       return o.enabled===false;
     }
     if(id==='palette'||id==='coast') return o.enabled===false;
+    if(id==='distance') return !!S.has_dist;   // the cached field ignores it
     return false;                      // distance.down still shapes the load
   }
-  if(kind==='filter') return o.enabled===false;
+  if(kind==='filter'){
+    if(o.enabled===false) return true;
+    if(o.type==='currents'&&k==='deflect_reach') return !(o.deflect>0);
+    return false;
+  }
   if(kind==='mask'){
-    if(k==='feather') return true;            // not mapped into the mask weight
     if(k==='tap') return o.source!=='height';
-    if(k==='scale') return o.source!=='noise';
+    if(k==='scale'||k==='seed') return o.source!=='noise';
   }
   return false;
+}
+const BLEND_ALL=['add','subtract','multiply','screen','overlay','lighter','darker'];
+// a filter whose contribution never changes sign cannot use the split modes
+const SIGN_FIXED={features:'positive',drainage:'negative',shelf:'negative',erode:'negative'};
+function blendChoices(kind,id){
+  if(kind!=='filter') return BLEND_ALL;
+  const f=findFilter(id); if(!f) return BLEND_ALL;
+  const s=SIGN_FIXED[f.type];
+  return BLEND_ALL.map(m=>{
+    if(s==='positive' && (m==='darker')) return {v:m,label:m+' (no effect: only adds)',off:true};
+    if(s==='negative' && (m==='lighter')) return {v:m,label:m+' (no effect: only removes)',off:true};
+    return m;
+  });
 }
 function field(kind,id,k,v,opts){
   const lab=document.createElement('label'); lab.textContent=k;
@@ -1830,13 +1980,14 @@ function field(kind,id,k,v,opts){
     ||(k==='enabled'?'enabled: off = this node passes its input straight through':'');
   lab.title=tip;
   let inp;
-  const choices=(k==='blend')?['add','multiply','lighter','darker']
+  const choices=(k==='blend')?blendChoices(kind,id)
     :((opts&&opts.options)||CHOICES[kind+'.'+id+'.'+k]||null);
   if(choices){
     const opt=o=>{
       const val=(o&&typeof o==='object')?o.v:o;
       const lab=(o&&typeof o==='object')?o.label:o;
-      return `<option value="${val}" ${String(val)===String(v)?'selected':''}>${lab}</option>`;
+      const off=(o&&o.off)?'disabled':'';
+      return `<option value="${val}" ${off} ${String(val)===String(v)?'selected':''}>${lab}</option>`;
     };
     inp=document.createElement('select');
     inp.innerHTML=choices.map(opt).join('');
@@ -1846,7 +1997,9 @@ function field(kind,id,k,v,opts){
     inp.onchange=()=>set(kind,id,k,inp.checked);
   } else if(typeof v==='number'){
     inp=document.createElement('input'); inp.type='number'; inp.step='any'; inp.value=v;
-    inp.onchange=()=>set(kind,id,k,parseFloat(inp.value));
+    inp.onchange=()=>{ const x=parseFloat(inp.value);
+      if(!isFinite(x)){ inp.value=v; return; }       // blank box keeps the old value
+      set(kind,id,k,x); };
   } else {
     inp=document.createElement('input'); inp.type='text'; inp.value=v;
     inp.onchange=()=>set(kind,id,k,inp.value);
@@ -1861,6 +2014,8 @@ function renderParams(){
   const el=document.getElementById('params'); el.innerHTML='';
   document.getElementById('curvewrap').innerHTML='';
   document.getElementById('ovparams').innerHTML='';
+  const wiredEl=document.getElementById('wired'); wiredEl.innerHTML='';
+  const wiredH=document.getElementById('wiredH'); if(wiredH) wiredH.style.display='none';
   const node=S.nodes[sel], mask=S.masks[sel];
   const filt=findFilter(sel);
   if(mask){
@@ -1869,7 +2024,7 @@ function renderParams(){
     const ni=document.createElement('input'); ni.type='text'; ni.value=mask.name||'';
     ni.placeholder=sel; ni.onchange=()=>set('masks',sel,'name',ni.value);
     el.append(nl,ni);
-    const KEYS=['source','tap','scale','lo','hi','feather','invert'];
+    const KEYS=['source','tap','scale','seed','lo','hi','invert'];
     for(const [k,v] of Object.entries(mask)){
       if(!KEYS.includes(k)) continue;
       if(k==='tap'){
@@ -1899,7 +2054,8 @@ function renderParams(){
         {dkey:filt.type+'.'+k,obj:filt}));
     }
     for(const [k,v] of Object.entries(filt)){
-      if(k in defs||['id','type','enabled','masks','out_curve','children','name'].includes(k)) continue;
+      if(k in defs||['id','type','enabled','masks','out_curve','children','name',
+                     'overlay','ov_density','ov_length','ov_colour'].includes(k)) continue;
       el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k,obj:filt}));
     }
     const sh=document.createElement('h3'); sh.textContent='sub-filters';
@@ -1927,7 +2083,8 @@ function renderParams(){
       w.appendChild(h);
       w.appendChild(curveUI(filt.out_curve, pts=>set('filters',sel,'out_curve',pts)));
     }
-    const wired=document.getElementById('wired'); wired.innerHTML='';
+    const wired=document.getElementById('wired');
+    const wh=document.getElementById('wiredH'); if(wh) wh.style.display='block';
     for(const mid of Object.keys(S.masks)){
       const l=document.createElement('label'); const cb=document.createElement('input');
       cb.type='checkbox'; cb.checked=(filt.masks||[]).includes(mid);
@@ -1935,7 +2092,7 @@ function renderParams(){
         + 'is on (blur and warp) or is scaled by it (noise, features, erode, drainage, shelf)';
       cb.title=l.title;
       cb.onchange=()=>{const arr=new Set(filt.masks||[]);
-        cb.checked?arr.add(mid):arr.delete(mid); set('filters',sel,'masks',[...arr]);};
+        cb.checked?arr.add(mid):arr.delete(mid); set('filters',filt.id,'masks',[...arr]);};
       l.appendChild(cb); l.appendChild(document.createTextNode(mLabel(mid))); wired.appendChild(l);
     }
     const box=document.getElementById('ovparams');
@@ -1955,12 +2112,15 @@ function renderParams(){
     col.onchange=()=>set('filters',filt.id,'ov_colour',col.value);
     orow.append(col);
     box.appendChild(orow);
+    const usesDensity=OVERLAY_DENSITY_KINDS.includes(filt.overlay||'');
     const drow=document.createElement('div'); drow.style.display='flex'; drow.style.gap='6px';
-    for(const [k,lab] of [['ov_density','density'],['ov_length','length']]){
+    for(const [k,lab] of [['ov_density','spacing'],['ov_length','length']]){
       const l=document.createElement('label'); l.textContent=lab; l.style.margin='0';
       const i=document.createElement('input'); i.type='number'; i.step='1';
       i.value=filt[k]!==undefined?filt[k]:(k==='ov_density'?26:14);
       i.style.width='64px'; i.onchange=()=>set('filters',filt.id,k,parseFloat(i.value));
+      if(!usesDensity || (k==='ov_length' && filt.overlay==='zones')){ i.disabled=true;
+        l.classList.add('off'); i.classList.add('off'); }
       drow.append(l,i);
     }
     box.appendChild(drow);
@@ -1993,16 +2153,7 @@ function renderParams(){
       w.appendChild(h); w.appendChild(curveUI(node.out_curve,
         pts=>set('nodes',sel,'out_curve',pts)));
     }
-    const wired=document.getElementById('wired'); wired.innerHTML='';
-    for(const mid of Object.keys(S.masks)){
-      const l=document.createElement('label'); const cb=document.createElement('input');
-      cb.type='checkbox'; cb.checked=(node.masks||[]).includes(mid);
-      l.title='wire this mask into '+sel+': the effect is multiplied by it';
-      cb.title=l.title;
-      cb.onchange=()=>{const arr=new Set(node.masks||[]);
-        cb.checked?arr.add(mid):arr.delete(mid); set('nodes',sel,'masks',[...arr]);};
-      l.appendChild(cb); l.appendChild(document.createTextNode(mLabel(mid))); wired.appendChild(l);
-    }
+    // fixed nodes read no masks, so nothing is offered here
   } else { document.getElementById('wired').innerHTML=''; }
 }
 function hex(c){return '#'+c.map(v=>Math.max(0,Math.min(255,Math.round(v))).toString(16).padStart(2,'0')).join('');}
@@ -2026,7 +2177,7 @@ function paletteEditor(node){
     g.fillStyle=hex(c); g.fillRect(x,0,1,26);
   }
   box.appendChild(cv);
-  const commit=()=>set('nodes','palette',{stops,cols});
+  const commit=()=>set('nodes','palette','all',{stops,cols});
   stops.forEach((st,i)=>{
     const row=document.createElement('div'); row.className='node';
     const p=document.createElement('input'); p.type='number'; p.step='0.01'; p.value=st;
@@ -2090,13 +2241,16 @@ async function set(kind,id,k,v){
   }
   // anything that changes what the panel draws (a reset curve, a new mode)
   // has to rebuild it; the curve canvas holds its own copy of the points
-  if(k==='mode'||k==='source'||k==='enabled'||k==='out_curve') renderParams();
+  if(k==='mode'||k==='source'||k==='enabled'||k==='out_curve'||k==='overlay') renderParams();
+  if(k==='overlay_map') syncMap();
   if(k==='name'){ renderNodes(); renderMasks(); }
   if(S.auto) setTimeout(poll,120); else poll();
 }
 document.getElementById('go').onclick=render;
 document.getElementById('addmask').onclick=()=>api('/api/mask/add',{}).then(reload);
 document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
+document.getElementById('wnoise').onchange=e=>
+  api('/api/set',{id:'world_noise',k:'all',v:e.target.checked}).then(()=>{render();});
 document.getElementById('addfilter').onclick=()=>{
   api('/api/filter/add',{type:document.getElementById('ftype').value}).then(reload);};
 document.getElementById('reset').onclick=async()=>{ if(!confirm('reset to defaults?'))return;
@@ -2137,8 +2291,7 @@ document.getElementById('chan').onchange=()=>{const v=chan.value;
   api('/api/set',{id:'channel',k:'all',v}).then(()=>{S.channel=v;render();});};
 const prev=document.getElementById('prev');
 let panTimer=null;
-async function pushRegion(fast){
-  await api('/api/set',{id:'fast',k:'all',v:fast});
+async function pushRegion(){
   const r=region();
   await api('/api/set',{id:'region',k:'all',v:r});
   S.region=r;
@@ -2150,15 +2303,17 @@ prev.onmousedown=e=>{panDrag={x:e.clientX,y:e.clientY};
 addEventListener('mousemove',e=>{if(!panDrag)return;
   const dx=e.clientX-panDrag.x, dy=e.clientY-panDrag.y;
   panDrag.x=e.clientX; panDrag.y=e.clientY;
-  rx.value=+rx.value-Math.round(dx/S.region.scale);
-  ry.value=+ry.value-Math.round(dy/S.region.scale);
+  const xs=prev.clientWidth/(S.region.w||prev.clientWidth);
+  const ys=prev.clientHeight/(S.region.h||prev.clientHeight);
+  rx.value=+rx.value-Math.round(dx/xs);
+  ry.value=+ry.value-Math.round(dy/ys);
   // nudge what we have immediately, then render the strip we are moving to
   const mo=document.getElementById('mapov');
   if(S.nodes.output&&S.nodes.output.overlay_map) syncMapSoon();
   // the sea is intentionally left stale until release
 });
 addEventListener('mouseup',()=>{if(!panDrag)return;panDrag=null;prev.style.cursor='grab';
-  pushRegion(false);});
+  pushRegion();});
 boot();
 </script>"""
 
@@ -2167,9 +2322,9 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def _json(self, obj):
+    def _json(self, obj, code=200):
         body = json.dumps(obj).encode()
-        self.send_response(200)
+        self.send_response(code)
         self.send_header("content-type", "application/json")
         self.send_header("cache-control", "no-store")
         self.send_header("content-length", str(len(body)))
@@ -2231,7 +2386,6 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/status":
             with _lock:
                 data = dict(_render)
-                data["has_image"] = _png is not None
             self._json(data)
         elif self.path == "/api/state":
             with _lock:
@@ -2240,6 +2394,7 @@ class Handler(BaseHTTPRequestHandler):
                       "map": {"w": int(load_map().shape[1]),
                               "h": int(load_map().shape[0])},
                       "overlay_map": bool(STATE["nodes"]["output"].get("overlay_map")),
+                      "has_dist": bool(dist_full() is not None),
                       "nodes": STATE["nodes"], "masks": STATE["masks"],
                       "filters": STATE["filters"], "filter_defs": FILTER_DEFS,
                       "order": ["distance", "height"] + [f["id"] for f in STATE["filters"]]
@@ -2255,7 +2410,8 @@ class Handler(BaseHTTPRequestHandler):
                           + debug_channels()),
                       "taps": taps,
                       "desc": DESC, "io": NODE_IO,
-                      "last": STATE.get("last", "erode"), "auto": _render["auto"]}
+                      "last": STATE.get("last", "erode"), "auto": _render["auto"],
+                      "world_noise": bool(STATE.get("world_noise"))}
             self._json(st)
         else:
             self.send_response(404)
@@ -2263,7 +2419,21 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         n = int(self.headers.get("content-length", 0))
-        body = json.loads(self.rfile.read(n) or b"{}")
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except Exception:
+            self.send_response(400); self.end_headers(); return
+        try:
+            self._post(body)
+        except Exception as exp:
+            msg = str(exp) or type(exp).__name__
+            print("POST", self.path, "failed:", msg, flush=True)
+            try:
+                self._json({"ok": False, "error": msg}, 400)
+            except Exception:
+                pass
+
+    def _post(self, body):
         with _lock:
             if self.path == "/api/filter/add":
                 n = STATE.get("next_filter", 1)
@@ -2278,9 +2448,16 @@ class Handler(BaseHTTPRequestHandler):
                     STATE["filters"].append(new)
                 STATE["next_filter"] = n + 1
             elif self.path == "/api/filter/del":
-                _, owner = filter_owner(body.get("id"))
+                fid = body.get("id")
+                _, owner = filter_owner(fid)
                 if owner is not None:
-                    owner[:] = [f for f in owner if f["id"] != body.get("id")]
+                    owner[:] = [f for f in owner if f["id"] != fid]
+                for m in STATE["masks"].values():
+                    if m.get("tap") == fid:
+                        m["tap"] = ""
+                ch = STATE.get("channel", "")
+                if ch.startswith(f"dbg:{fid}:"):
+                    STATE["channel"] = "output"
             elif self.path == "/api/filter/move":
                 _, owner = filter_owner(body.get("id"))
                 if owner is not None:
@@ -2294,18 +2471,16 @@ class Handler(BaseHTTPRequestHandler):
                 State_mid = f"mask_{n}"
                 STATE["next_mask"] = n + 1
                 STATE["masks"][State_mid] = dict(
-                    source="height", tap="", scale=400, lo=0.2, hi=0.8,
-                    feather=1.0, invert=False)
+                    source="height", tap="", scale=400, seed=3, lo=0.2, hi=0.8,
+                    invert=False)
             elif self.path == "/api/mask/del":
                 mid = body.get("id")
                 STATE["masks"].pop(mid, None)
                 for node in list(STATE["nodes"].values()) + list(walk_filters(STATE["filters"])):
                     if isinstance(node.get("masks"), list) and mid in node["masks"]:
                         node["masks"].remove(mid)
-            elif self.path == "/api/filter/name":
-                f = find_filter(body.get("id"))
-                if f is not None:
-                    f["name"] = str(body.get("name", ""))
+                if STATE.get("channel") == mid:
+                    STATE["channel"] = "output"
             elif self.path == "/api/reset":
                 STATE.clear()
                 STATE.update(default_state())
@@ -2314,20 +2489,37 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/auto":
                 _render["auto"] = bool(body.get("on"))
             elif self.path == "/api/set":
+                if "id" not in body or "k" not in body or "v" not in body:
+                    raise ValueError("set needs id, k and v")
                 nid, key, val = body["id"], body["k"], body["v"]
+                if isinstance(val, float) and val != val:
+                    raise ValueError("that value is not a number")
                 if nid == "region":
-                    msg = region_limit_msg(val)
-                    if msg:
-                        _render["error"] = msg
+                    r = dict(val)
+                    px = max(1, int(r.get("w", 0)) * int(r.get("h", 0)))
+                    if px > MAX_REGION_PX:
+                        k = (MAX_REGION_PX / float(px)) ** 0.5
+                        w0, h0 = int(r["w"]), int(r["h"])
+                        r["w"] = max(64, int(w0 * k))
+                        r["h"] = max(48, int(h0 * k))
+                        r["x0"] = int(r.get("x0", 0) + (w0 - r["w"]) / 2)
+                        r["y0"] = int(r.get("y0", 0) + (h0 - r["h"]) / 2)
+                        _render["error"] = (
+                            f"region was {w0}x{h0}, capped to {r['w']}x{r['h']} "
+                            f"({MAX_REGION_PX/1e6:.0f} MPx limit)")
                     else:
-                        STATE["region"] = val
+                        _render["error"] = None
+                    w_map = load_map().shape[1]; h_map = load_map().shape[0]
+                    r["x0"] = max(0, min(w_map - max(32, int(r["w"])), int(r["x0"])))
+                    r["y0"] = max(0, min(h_map - max(32, int(r["h"])), int(r["y0"])))
+                    STATE["region"] = r
                 elif nid == "channel":
                     STATE["channel"] = val
                 elif nid == "overlay":
                     STATE["overlay_map"] = bool(val)
-                elif nid == "fast":
-                    STATE["fast"] = bool(val)
+
                 elif nid in STATE["nodes"]:
+                    key, val = _clamp_param(nid, None, key, val)
                     if key == "all":
                         STATE["nodes"][nid].update(val)
                     else:
@@ -2335,6 +2527,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     f = find_filter(nid)
                     if f is not None:
+                        key, val = _clamp_param(None, f, key, val)
                         if key == "all":
                             f.update(val)
                         else:
@@ -2353,9 +2546,8 @@ class Handler(BaseHTTPRequestHandler):
                 name = os.path.basename(body["name"])
                 path = os.path.join(PRESETS, name + ".json")
                 with open(path, "w") as f:
-                    json.dump({"region": STATE["region"], "nodes": STATE["nodes"],
-                               "masks": STATE["masks"], "filters": STATE["filters"],
-                               "next_filter": STATE.get("next_filter", 1)}, f, indent=1)
+                    json.dump({k: STATE[k] for k in STATE_KEYS if k in STATE},
+                              f, indent=1)
             elif self.path == "/api/restore":
                 # put a whole state back, e.g. from the browser copy after a restart
                 body = {k: v for k, v in body.items() if k in STATE_KEYS}
@@ -2387,10 +2579,21 @@ class Handler(BaseHTTPRequestHandler):
                         STATE["nodes"][nid].update(params)
                 if "masks" in data:
                     STATE["masks"] = data["masks"]
-                if "filters" in data:
-                    STATE["filters"] = data["filters"]
+                # a preset is a snapshot: no filters really means no filters
+                STATE["filters"] = data.get("filters", [])
                 normalise_filters(STATE["filters"])
-                STATE["next_filter"] = data.get("next_filter", len(STATE["filters"]) + 1)
+                for k in ("channel", "overlay_map", "world_noise"):
+                    if k in data:
+                        STATE[k] = data[k]
+                STATE["next_filter"] = max(
+                    [int(f["id"][1:]) for f in walk_filters(STATE["filters"])
+                     if f.get("id", "").startswith("f") and f["id"][1:].isdigit()] + [0]) + 1
+                STATE["next_mask"] = max(
+                    [int(k.split("_")[1]) for k in STATE["masks"]
+                     if k.startswith("mask_") and k.split("_")[1].isdigit()] + [0]) + 1
+                if STATE["channel"] not in ("output", "h", "d", "color") \
+                        and not STATE["channel"].startswith("dbg:"):
+                    STATE["channel"] = "output"
                 _cache.clear()
         if self.path != "/api/render" and self.path != "/api/select":
             save_state()
