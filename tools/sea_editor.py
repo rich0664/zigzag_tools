@@ -160,7 +160,7 @@ FILTER_DEFS = {
     "basins": dict(threshold=60.0, spacing=120.0, levels=4, soft=40.0,
                    amp=0.4, seed=5, blend="lighter"),
     # sediment carried by the coarse gyres: shoals trail downstream of islands
-    "currents": dict(source="distance", source_level=0.55, reach=140.0,
+    "currents": dict(source="distance", source_level=0.55, scale=2, reach=140.0,
                      travel=45, settle=0.997, step=6.0, strength=1.0, soft=3.0,
                      deflect=0.30, deflect_reach=110.0, speed_bias=0.0,
                      conserve=1.0, direction=0.0, core=0.0, feedback=0.0,
@@ -243,6 +243,8 @@ DESC = {
                        "settles close to the coast, 0.9995 carries it out over "
                        "the slope",
     "currents.step": "pixels travelled per advection step",
+    "currents.scale": "resolution of the transport: 2 = half (4x faster, the "
+                      "plume is smoothed anyway), 1 = full, 4 = quarter",
     "currents.reach": "for source=distance: how far from land sediment is "
                       "picked up, in tiles",
     "currents.travel": "how many advection steps it is carried for: more = longer "
@@ -1149,32 +1151,52 @@ def f_currents(h, node, ctx):
     surge = int(node.get("surge", 0))
     settle = float(np.clip(float(node.get("settle", 0.997)), 0.9, 0.99995))
     step_px = float(np.clip(float(node.get("step", 6.0)), 0.5, 40.0))
-    cur = src.copy()
-    floor = h
     gen = ctx.get("gen", 0)
+
+    # The transport is a full-plane pass per step, but the fields it moves are
+    # low frequency (the gyres are 16 tiles per cell and the source is smooth),
+    # so it can run on a coarser grid and be scaled back up.
+    s = max(1, min(8, int(node.get("scale", 2))))
+    if s > 1:
+        src_t = src[::s, ::s]
+        h_t = h[::s, ::s]
+        u_t = u[::s, ::s]
+        v_t = v[::s, ::s]
+        Ht, Wt = h_t.shape
+        yy_t, xx_t = np.mgrid[0:Ht, 0:Wt].astype(np.float32)
+        step_t = step_px / s
+    else:
+        src_t, h_t, u_t, v_t = src, h, u, v
+        yy_t, xx_t, step_t = yy, xx, step_px
+
+    cur = src_t.copy()
+    floor = h_t
     for i in range(max(1, int(node["travel"]))):
         if gen and (i & 7) == 0:
             check_cancel(gen)
-        uu, vv = u, v
+        uu, vv = u_t, v_t
         if feedback:
             # the current feels the bottom it is building: bend it along the
             # contours of the *current* height, not the original distance
             gy2, gx2 = np.gradient(sc.box_blur(floor, 8, 2))
             nd = np.hypot(gx2, gy2) + 1e-6
-            uu = u * (1 - feedback) + (-gy2 / nd) * feedback
-            vv = v * (1 - feedback) + (gx2 / nd) * feedback
+            uu = u_t * (1 - feedback) + (-gy2 / nd) * feedback
+            vv = v_t * (1 - feedback) + (gx2 / nd) * feedback
             m2 = np.hypot(uu, vv) + 1e-6
             uu = uu / m2
             vv = vv / m2
         if surge > 0 and (i // surge) % 2 == 1:
             uu, vv = -uu, -vv          # the current reverses: tidal, monsoon
-        step_dep = sample_bilinear(cur, yy - vv * step_px, xx - uu * step_px)
+        step_dep = sample_bilinear(cur, yy_t - vv * step_t, xx_t - uu * step_t)
         cur = 0.5 * cur + 0.5 * step_dep
-        cur = np.maximum(cur, src) * settle
+        cur = np.maximum(cur, src_t) * settle
         if feedback:
             floor = np.clip(floor + 0.15 * step_dep, 0, 1)
-    cur = cur * weight
-    dep = np.clip(cur - src, 0, 1)          # where sediment arrived
+
+    if s > 1:
+        dep = sc.upscale(np.clip(cur - src_t, 0, 1), (W, H)) * weight
+    else:
+        dep = np.clip(cur * weight - src, 0, 1)   # where sediment arrived
     dbg = ctx.get("debug")
     if dbg is not None:
         d_ = dbg.setdefault(node["id"], {})
@@ -1697,6 +1719,7 @@ LIMITS = {
     ("erode", "window"): (1, 40),
     ("basins", "levels"): (1, 12),
     ("basins", "threshold"): (1.0, 5000.0),
+    ("currents", "scale"): (1, 8),
     ("currents", "reach"): (1.0, 2000.0),
     ("currents", "travel"): (1, 400),
     ("currents", "conserve"): (0.0, 1.0),
@@ -1709,6 +1732,10 @@ LIMITS = {
 }
 
 
+INT_KEYS = {"octaves", "seed", "layers", "window", "travel", "surge", "down",
+            "levels", "radius", "ov_density", "ov_length", "scale"}
+
+
 def _clamp_param(nid, node, key, val):
     """keep UI-reachable values inside the range the math can survive"""
     if key == "all" and isinstance(val, dict):
@@ -1717,6 +1744,9 @@ def _clamp_param(nid, node, key, val):
     rng = LIMITS.get((t, key))
     if rng and isinstance(val, (int, float)) and not isinstance(val, bool):
         val = type(val)(min(rng[1], max(rng[0], val)))
+    if (key in INT_KEYS or (nid and nid in STATE["nodes"] and key in INT_KEYS)) \
+            and isinstance(val, (int, float)) and not isinstance(val, bool):
+        val = max(0, int(round(val)))
     if (t, key) == ("height", "slope_t") and node is not None:
         val = max(float(val), float(node.get("shelf_t", 0.0)) + 0.01)
     return key, val
@@ -2115,6 +2145,9 @@ const OVERLAY_KINDS={
   features:['contours'], blur:['contours'], erode:['contours'], shelf:['contours']
 };
 const OVERLAY_DENSITY_KINDS=['flow','vectors'];
+// parameters that are counts: no fractions, and no negatives
+const INT_PARAMS=new Set(['octaves','seed','layers','window','travel','surge',
+  'down','levels','radius','ov_density','ov_length','scale']);
 const CHOICES={
   'nodes.height.mode':['profile','ramp'],
   'nodes.distance.down':['1','2']
@@ -2191,9 +2224,12 @@ function field(kind,id,k,v,opts){
     inp=document.createElement('input'); inp.type='checkbox'; inp.checked=v;
     inp.onchange=()=>set(kind,id,k,inp.checked);
   } else if(typeof v==='number'){
-    inp=document.createElement('input'); inp.type='number'; inp.step='any'; inp.value=v;
-    inp.onchange=()=>{ const x=parseFloat(inp.value);
+    const isInt=INT_PARAMS.has(k);
+    inp=document.createElement('input'); inp.type='number';
+    inp.step=isInt?'1':'any'; inp.min=isInt?'0':''; inp.value=v;
+    inp.onchange=()=>{ let x=parseFloat(inp.value);
       if(!isFinite(x)){ inp.value=v; return; }       // blank box keeps the old value
+      if(isInt){ x=Math.round(x); if(x<0) x=0; inp.value=x; }
       set(kind,id,k,x); };
   } else {
     inp=document.createElement('input'); inp.type='text'; inp.value=v;
