@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         zig~zag sea depth
 // @namespace    zigzagTools
-// @version      0.2.14
+// @version      0.2.15
 // @description  Draws a bathymetric sea between the zig-zag.fm archipelagos: depth = distance from land, terrain = layered noise, rendered tile-aligned behind the map.
 // @match        https://www.zig-zag.fm/*
 // @grant        none
@@ -24,7 +24,7 @@
   'use strict';
 
   const SEA_URL = window.__ZZ_SEA_URL ||
-    'https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist/zigzag-sea.webp?v=0.2.14';
+    'https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist/zigzag-sea.webp?v=0.2.15';
   const MAP_W = 7749;          // main map extent, in tiles
   const MAP_H = 5254;
   const OV_ID = 'zz-sea';

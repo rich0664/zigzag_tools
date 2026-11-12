@@ -1413,9 +1413,9 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                         val = np.interp(val, c[0], c[1]).astype(np.float32)
             if USE_CACHE:
                 planes = None
-            if need_planes:
-                planes = dict(ctx["debug"].get(nid, {})) or None
-            _cache[nid] = (chain_sig, val, planes)
+                if need_planes:
+                    planes = dict(ctx["debug"].get(nid, {})) or None
+                _cache[nid] = (chain_sig, val, planes)
         times[nid] = round((time.perf_counter() - t_node) * 1000.0, 1)
 
         if isinstance(val, np.ndarray) and getattr(val, "ndim", 0) == 2:
