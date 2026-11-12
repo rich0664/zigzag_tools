@@ -402,7 +402,12 @@ def _compute_currents():
     for k, (y, x) in enumerate(seeds, start=1):
         lab[y, x] = k
         heapq.heappush(heap, (-float(coarse[y, x]), y, x))
+    gen = ctx.get("gen", 0)
+    pops = 0
     while heap:
+        pops += 1
+        if gen and (pops & 8191) == 0:
+            check_cancel(gen)
         _, y, x = heapq.heappop(heap)
         k = lab[y, x]
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -465,7 +470,9 @@ def sample_bilinear(img, ys, xs):
     ys = np.clip(ys, 0, h - 1.001)
     xs = np.clip(xs, 0, w - 1.001)
     y0 = ys.astype(np.int32); x0 = xs.astype(np.int32)
-    fy = ys - y0; fx = xs - x0
+    # keep the weights float32: float32 - int32 promotes to float64, which then
+    # doubles the memory traffic for the whole advection loop
+    fy = ys - y0.astype(np.float32); fx = xs - x0.astype(np.float32)
     y1 = np.minimum(y0 + 1, h - 1); x1 = np.minimum(x0 + 1, w - 1)
     return ((1 - fy) * ((1 - fx) * img[y0, x0] + fx * img[y0, x1])
             + fy * ((1 - fx) * img[y1, x0] + fx * img[y1, x1]))
@@ -473,6 +480,8 @@ def sample_bilinear(img, ys, xs):
 
 _overlay = None
 _map_rgba = None
+_map_cache = {}
+MAP_CACHE_MAX = 24
 
 
 def map_rgba():
@@ -634,6 +643,9 @@ def apply_curve(delta, pts):
     if c is None:
         return delta
     xs, ys = c
+    if len(xs) == 2 and abs(xs[0]) < 1e-6 and abs(xs[1] - 1.0) < 1e-6 \
+            and abs(ys[0]) < 1e-6 and abs(ys[1] - 1.0) < 1e-6:
+        return delta                     # identity: nothing to interpolate
     y0 = float(np.interp(0.0, xs, ys))
     shaped = np.interp(np.abs(delta), xs, ys) - y0
     return (np.sign(delta) * shaped).astype(np.float32)
@@ -816,7 +828,8 @@ def palette_arrays(node):
 def n_palette(node, ctx, prev_sig):
     t = np.clip(1.0 - ctx["h"], 0, 1)
     stops, cols = palette_arrays(node)
-    rgb = np.stack([np.interp(t, stops, cols[:, i]) for i in range(3)], -1)
+    rgb = np.stack([np.interp(t, stops, cols[:, i]) for i in range(3)],
+                   -1).astype(np.float32)
     sh = ctx.get("shade")
     if sh is not None:
         rgb = rgb * sh[:, :, None]
@@ -881,14 +894,25 @@ def flow_dirs(h):
     return best.ravel(), bestdrop
 
 
-def flow_accum(rec, order):
-    """upstream cell count, accumulated downhill (order = high to low)"""
-    acc = np.ones(rec.size, dtype=np.float32)
-    for i in order:
-        r = rec[i]
-        if r >= 0:
-            acc[r] += acc[i]
-    return acc
+def flow_accum(rec, order, cancel=None):
+    """upstream cell count, accumulated downhill (order = high to low).
+
+    Worked in plain C arrays: indexing a numpy array per cell costs a Python
+    scalar plus a fancy index, which made this 2x slower than it needs to be."""
+    from array import array
+    n = int(rec.size)
+    rec_i = array("i")
+    rec_i.frombytes(np.ascontiguousarray(rec, dtype=np.int32).tobytes())
+    acc_f = array("f")
+    acc_f.frombytes(np.ones(n, dtype=np.float32).tobytes())
+    for i0 in range(0, n, 1 << 20):
+        if cancel is not None:
+            cancel()
+        for c in order[i0:i0 + (1 << 20)].tolist():
+            r = rec_i[c]
+            if r >= 0:
+                acc_f[r] += acc_f[c]
+    return np.frombuffer(acc_f, dtype=np.float32).copy()
 
 
 def n_drainage(node, ctx, prev_sig):
@@ -913,7 +937,7 @@ def n_drainage(node, ctx, prev_sig):
                              .resize((W, H), Image.BICUBIC))
             dbg.setdefault(node["id"], {})["flow"] = plane
         order = np.argsort(-cur.ravel(), kind="stable")
-        acc = flow_accum(rec, order)
+        acc = flow_accum(rec, order, cancel=_canceller(ctx))
         A = (acc / max(1.0, float(acc.max()))) ** float(node["m"])
         S = np.clip(slope.ravel() / max(1e-6, float(slope.max())), 0, 1) ** float(node["n"])
         step = np.clip(float(node["k"]) * A * S, 0, float(node.get("cap", 0.1))).reshape(SH, SW)
@@ -1021,7 +1045,12 @@ def f_basins(h, node, ctx):
         lab[y, x] = k
         heapq.heappush(heap, (-float(coarse[y, x]), y, x))
     # flood from the deep points upward: two basins meet at the shallow sill
+    gen = ctx.get("gen", 0)
+    pops = 0
     while heap:
+        pops += 1
+        if gen and (pops & 8191) == 0:
+            check_cancel(gen)
         _, y, x = heapq.heappop(heap)
         k = lab[y, x]
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -1122,7 +1151,10 @@ def f_currents(h, node, ctx):
     step_px = float(np.clip(float(node.get("step", 6.0)), 0.5, 40.0))
     cur = src.copy()
     floor = h
+    gen = ctx.get("gen", 0)
     for i in range(max(1, int(node["travel"]))):
+        if gen and (i & 7) == 0:
+            check_cancel(gen)
         uu, vv = u, v
         if feedback:
             # the current feels the bottom it is building: bend it along the
@@ -1280,9 +1312,10 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
     global _cache
     region = region or STATE["region"]
     land, d = load_region(region, cancel=(lambda: check_cancel(gen)) if gen else None)
-    want_debug = bool(STATE.get("_want_debug"))
+    want_debug = STATE.get("_want_debug") or ()
     ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {},
-           "gen": gen, "region": region, "debug": {} if want_debug else None}
+           "gen": gen, "region": region,
+           "debug": _Debug(want_debug) if want_debug else None}
     steps = [("distance", None), ("height", None)]
     steps += [(f["id"], f) for f in STATE["filters"]]
     steps += [("palette", None), ("coast", None), ("output", None)]
@@ -1341,7 +1374,10 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                 elif (isinstance(val, np.ndarray) and has_curve
                         and nid == "height"):
                     c = sorted_curve(pts)
-                    if c is not None:
+                    if c is not None and not (
+                            len(c[0]) == 2 and abs(c[0][0]) < 1e-6
+                            and abs(c[0][1] - 1.0) < 1e-6
+                            and abs(c[1][0]) < 1e-6 and abs(c[1][1] - 1.0) < 1e-6):
                         val = np.interp(val, c[0], c[1]).astype(np.float32)
             if USE_CACHE:
                 _cache[nid] = (chain_sig, val)
@@ -1506,6 +1542,7 @@ def overlay_png(ctx):
     H, W = ctx["land"].shape
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
     dr = ImageDraw.Draw(img)
+    gen = ctx.get("gen", 0)
 
     for f in active:
         kind = f["overlay"]
@@ -1517,6 +1554,8 @@ def overlay_png(ctx):
         if kind == "flow" and "u" in planes and "v" in planes:
             su, sv = _sampler(planes["u"]), _sampler(planes["v"])
             for y in range(step // 2, H, step):
+                if gen and (y & 255) == 0:
+                    check_cancel(gen)
                 for x in range(step // 2, W, step):
                     if ctx["land"][y, x]:
                         continue
@@ -1533,6 +1572,8 @@ def overlay_png(ctx):
         elif kind == "flow" and "flow" in planes:
             sa = _sampler(planes["flow"])
             for y in range(step // 2, H, step):
+                if gen and (y & 255) == 0:
+                    check_cancel(gen)
                 for x in range(step // 2, W, step):
                     if ctx["land"][y, x]:
                         continue
@@ -1551,6 +1592,8 @@ def overlay_png(ctx):
             sdx = _sampler(planes["dx"]); sdy = _sampler(planes["dy"])
             scale = max(0.25, min(3.0, 400.0 / max(1.0, float(np.abs(planes["dx"]).max()))))
             for y in range(step // 2, H, step):
+                if gen and (y & 255) == 0:
+                    check_cancel(gen)
                 for x in range(step // 2, W, step):
                     if ctx["land"][y, x]:
                         continue
@@ -1670,11 +1713,27 @@ def _clamp_param(nid, node, key, val):
     return key, val
 
 
+class _Debug(dict):
+    """only keeps planes for the nodes that actually asked for them: an overlay
+    on one filter used to force every filter to allocate its debug planes"""
+
+    def __init__(self, ids):
+        super().__init__()
+        self.ids = set(ids)
+
+    def setdefault(self, k, default=None):
+        if k not in self.ids:
+            return {}                     # throwaway, the write goes nowhere
+        return super().setdefault(k, default)
+
+
 def _wants_debug():
+    """which filters need debug planes this render, or an empty set"""
+    ids = {f["id"] for f in walk_filters(STATE["filters"]) if f.get("overlay")}
     ch = STATE.get("channel", "")
     if ch.startswith("dbg:"):
-        return True
-    return any(f.get("overlay") for f in walk_filters(STATE["filters"]))
+        ids.add(ch.split(":", 2)[1])
+    return ids
 
 
 def render_now(gen=None):
@@ -1711,7 +1770,7 @@ def render_now(gen=None):
         # the real map is a separate overlay layer in the browser, so it can
         # follow a drag without waiting for the sea render
         buf = io.BytesIO()
-        Image.fromarray(rgb, "RGB").save(buf, "PNG")
+        Image.fromarray(rgb, "RGB").save(buf, "PNG", compress_level=1)
         with _lock:
             check_cancel(gen)      # a newer request landed while encoding
             _png = buf.getvalue()
@@ -1743,7 +1802,7 @@ def render_overlay_now():
     global _overlay
     _render["ov_running"] = True
     try:
-        STATE["_want_debug"] = True
+        STATE["_want_debug"] = _wants_debug()
         ctx = evaluate(region=dict(STATE["region"]))
         ov = overlay_png(ctx)
     except _Cancelled:
@@ -1928,7 +1987,7 @@ function hasOverlay(){
   let any=false; walkF(S.filters,f=>{ if(f.overlay) any=true; }); return any;
 }
 function mapUrl(r){
-  return `/api/map?x0=${r.x0}&y0=${r.y0}&w=${Math.round(r.w)}&h=${Math.round(r.h)}&t=${Date.now()}`;
+  return `/api/map?x0=${r.x0}&y0=${r.y0}&w=${Math.round(r.w)}&h=${Math.round(r.h)}`;
 }
 let mapSoon=null;
 function syncMapSoon(){
@@ -2373,7 +2432,7 @@ async function set(kind,id,k,v){
   if(k==='mode'||k==='source'||k==='enabled'||k==='out_curve'||k==='overlay') renderParams();
   if(k==='overlay_map') syncMap();
   if(k==='name'){ renderNodes(); renderMasks(); }
-  if(S.auto) setTimeout(poll,120); else poll();
+  if(S.auto) setTimeout(poll,420); else poll();   // the debounce is 350 ms
 }
 let viewing=null;                 // snapshot id being looked at, or null for live
 async function loadRoll(){
@@ -2504,11 +2563,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _png(self, data):
+    def _png(self, data, cache=False):
         self.send_response(200)
         self.send_header("content-type", "image/png")
         self.send_header("content-length", str(len(data)))
-        self.send_header("cache-control", "no-store")
+        self.send_header("cache-control", "max-age=3600" if cache else "no-store")
         self.end_headers()
         self.wfile.write(data)
 
@@ -2532,7 +2591,7 @@ class Handler(BaseHTTPRequestHandler):
             sid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
             path = os.path.join(SNAPSHOTS, os.path.basename(sid) + "_thumb.png")
             if os.path.isfile(path):
-                self._png(open(path, "rb").read())
+                self._png(open(path, "rb").read(), cache=True)
             else:
                 self.send_response(404); self.end_headers()
         elif self.path.startswith("/api/snapshot/image"):
@@ -2563,11 +2622,24 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("size")
                 x0 = max(0, min(MW - 1, x0))
                 y0 = max(0, min(MH - 1, y0))
-                tile = im.crop((x0, y0, min(MW, x0 + w), min(MH, y0 + h)))
-                if tile.size != (w, h):
-                    tile = tile.resize((w, h), Image.NEAREST)
-                buf = io.BytesIO(); tile.save(buf, "PNG")
-                self._png(buf.getvalue())
+                key = (x0, y0, w, h)
+                data = _map_cache.get(key)
+                if data is None:
+                    tile = im.crop((x0, y0, min(MW, x0 + w), min(MH, y0 + h)))
+                    if tile.size != (w, h):
+                        tile = tile.resize((w, h), Image.NEAREST)
+                    # the layer is a background reference: cap it so a big region
+                    # does not cost a second encoding the size of the preview
+                    if tile.width > 1400 or tile.height > 1000:
+                        k = min(1400.0 / tile.width, 1000.0 / tile.height)
+                        tile = tile.resize((max(1, int(tile.width * k)),
+                                            max(1, int(tile.height * k))), Image.LANCZOS)
+                    buf = io.BytesIO(); tile.save(buf, "PNG", compress_level=1)
+                    data = buf.getvalue()
+                    if len(_map_cache) >= MAP_CACHE_MAX:
+                        _map_cache.pop(next(iter(_map_cache)))
+                    _map_cache[key] = data
+                self._png(data, cache=True)
             except Exception:
                 self.send_response(204)      # half-typed numbers: just show nothing
                 self.end_headers()
