@@ -22,7 +22,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
-from PIL import Image, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter
 
 import sea_core as sc
 
@@ -116,6 +116,9 @@ def load_state():
 
 
 BLEND_MODES = ["add", "multiply", "lighter", "darker"]
+
+OVERLAY_DEFAULTS = dict(overlay="", ov_density=26, ov_length=14,
+                        ov_colour="255,205,120")
 
 FILTER_DEFS = {
     "warp": dict(tiles=20.0, scale=700, seed=34),
@@ -388,7 +391,7 @@ def _compute_currents():
     v = (v / mag).astype(np.float32)
     u[land_c] = 0
     v[land_c] = 0
-    return np.stack([u, v])
+    return np.stack([u, v, lab.astype(np.float32)])
 
 
 def currents_field():
@@ -398,7 +401,8 @@ def currents_field():
         path = os.path.join(WORK, "currents_uv.npy")
         if os.path.exists(path):
             try:
-                _currents = np.load(path)
+                arr = np.load(path)
+                _currents = arr if arr.shape[0] >= 3 else _compute_currents()
             except Exception:
                 _currents = _compute_currents()
         else:
@@ -421,6 +425,7 @@ def sample_bilinear(img, ys, xs):
             + fy * ((1 - fx) * img[y1, x0] + fx * img[y1, x1]))
 
 
+_overlay = None
 _map_rgba = None
 
 
@@ -551,6 +556,7 @@ def normalise_filters(filters):
     for f in filters:
         f.setdefault("children", [])
         f.setdefault("name", "")
+        f.setdefault("overlay", "")
         normalise_filters(f["children"])
 
 
@@ -1003,6 +1009,10 @@ def f_currents(h, node, ctx):
         d_["v"] = (-v).astype(np.float32)
         d_["speed"] = (speed / max(1e-6, float(np.percentile(speed, 99)))
                        ).astype(np.float32)
+        if uv.shape[0] >= 3:
+            iy = np.clip(gy.astype(np.int32), 0, uv.shape[1] - 1)
+            ix = np.clip(gx.astype(np.int32), 0, uv.shape[2] - 1)
+            d_["labels"] = uv[2][iy, ix].astype(np.float32)
     r = int(max(0.0, float(node.get("soft", 3.0))))
     if r:
         dep = sc.box_blur(dep, r, 2)
@@ -1144,7 +1154,9 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
                         region.get("x0"), region.get("y0"), region.get("w"),
                         region.get("h"), region.get("scale"))
         prev_sig = chain_sig
-        cached = _cache.get(nid) if USE_CACHE else None
+        want_planes = bool(node.get("overlay")) or (
+            STATE.get("channel", "").startswith(f"dbg:{nid}:"))
+        cached = _cache.get(nid) if (USE_CACHE and not want_planes) else None
         if cached and cached[0] == chain_sig:
             val = cached[1]
         else:
@@ -1296,6 +1308,137 @@ def channel_image(ctx, channel):
     return np.stack([v * 255] * 3, -1).astype(np.uint8)
 
 
+OVERLAY_KINDS = {
+    "currents": ("flow", "zones", "speed"),
+    "drainage": ("flow", "accum"),
+    "warp": ("vectors",),
+    "basins": ("zones", "floor"),
+    "regions": ("contours",),
+    "noise": ("contours",),
+    "features": ("contours",),
+    "blur": ("contours",),
+    "erode": ("contours",),
+    "shelf": ("contours",),
+}
+
+
+def _sampler(plane):
+    h, w = plane.shape
+    def at(x, y):
+        ix = int(min(w - 1, max(0, x)))
+        iy = int(min(h - 1, max(0, y)))
+        return float(plane[iy, ix])
+    return at
+
+
+def overlay_png(ctx):
+    """a transparent PNG of whatever the filters asked to show on top"""
+    active = [f for f in walk_filters(STATE["filters"]) if f.get("overlay")]
+    if not active:
+        return None
+    H, W = ctx["land"].shape
+    img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    dr = ImageDraw.Draw(img)
+
+    for f in active:
+        kind = f["overlay"]
+        planes = (ctx.get("debug") or {}).get(f["id"], {})
+        step = max(6, int(f.get("ov_density", 26)))
+        reach = max(2, int(f.get("ov_length", 14)))
+        col = tuple(int(c) for c in str(f.get("ov_colour", "255,205,120")).split(",")) + (235,)
+
+        if kind == "flow" and "u" in planes and "v" in planes:
+            su, sv = _sampler(planes["u"]), _sampler(planes["v"])
+            for y in range(step // 2, H, step):
+                for x in range(step // 2, W, step):
+                    if ctx["land"][y, x]:
+                        continue
+                    px, py, pts = float(x), float(y), []
+                    for _ in range(reach):
+                        pts.append((px, py))
+                        px += su(px, py) * 6.0
+                        py -= sv(px, py) * 6.0        # v is north-up
+                        if not (0 <= px < W and 0 <= py < H):
+                            break
+                    if len(pts) > 2:
+                        dr.line(pts, fill=col, width=1)
+
+        elif kind == "flow" and "flow" in planes:
+            sa = _sampler(planes["flow"])
+            for y in range(step // 2, H, step):
+                for x in range(step // 2, W, step):
+                    if ctx["land"][y, x]:
+                        continue
+                    px, py, pts = float(x), float(y), []
+                    for _ in range(reach):
+                        pts.append((px, py))
+                        a = sa(px, py)
+                        px += np.cos(a) * 6.0
+                        py += np.sin(a) * 6.0
+                        if not (0 <= px < W and 0 <= py < H):
+                            break
+                    if len(pts) > 2:
+                        dr.line(pts, fill=col, width=1)
+
+        elif kind == "vectors" and "dx" in planes and "dy" in planes:
+            sdx = _sampler(planes["dx"]); sdy = _sampler(planes["dy"])
+            scale = max(0.25, min(3.0, 400.0 / max(1.0, float(np.abs(planes["dx"]).max()))))
+            for y in range(step // 2, H, step):
+                for x in range(step // 2, W, step):
+                    if ctx["land"][y, x]:
+                        continue
+                    dx = sdx(x, y) * scale
+                    dy = sdy(x, y) * scale
+                    if abs(dx) + abs(dy) < 1.0:
+                        continue
+                    dr.line([(x, y), (x + dx, y - dy)], fill=col, width=1)
+                    dr.ellipse([x + dx - 1, y - dy - 1, x + dx + 1, y - dy + 1], fill=col)
+
+        elif kind == "speed" and "speed" in planes:
+            v = np.clip(np.asarray(planes["speed"], np.float32), 0, 1)
+            lo, hi = float(np.percentile(v[~ctx["land"]], 10)), float(np.percentile(v[~ctx["land"]], 99))
+            t = np.clip((v - lo) / max(1e-6, hi - lo), 0, 1) ** 1.5
+            wash = np.zeros((H, W, 4), np.uint8)
+            wash[..., 0] = 255
+            wash[..., 1] = 150
+            wash[..., 2] = 40
+            wash[..., 3] = (t * 80).astype(np.uint8)
+            wash[ctx["land"]] = 0
+            img.alpha_composite(Image.fromarray(wash, "RGBA"))
+
+        elif kind in ("zones", "floor") and ("labels" in planes or "label_c" in planes):
+            lab = planes.get("labels", planes.get("label_c"))
+            v = np.asarray(lab, np.float32)
+            edge = np.zeros(v.shape, bool)
+            edge[:, 1:] |= v[:, 1:] != v[:, :-1]
+            edge[1:, :] |= v[1:, :] != v[:-1, :]
+            # draw every boundary pixel and thicken it: the labels are coarse,
+            # so a 1-px line at 16-tile spacing reads as dashes
+            thick = np.asarray(Image.fromarray(edge.astype(np.uint8) * 255)
+                               .filter(ImageFilter.MaxFilter(3))) > 0
+            ys, xs = np.nonzero(thick & ~ctx["land"])
+            for yy, xx in zip(ys, xs):
+                img.putpixel((int(xx), int(yy)), col)
+
+        elif kind == "contours":
+            plane = planes.get("contribution", planes.get("levels", planes.get("field")))
+            if plane is None:
+                continue
+            v = np.asarray(plane, np.float32)
+            bands = 12
+            q = np.floor((v / max(1e-6, float(np.abs(v).max()))) * bands)
+            edge = np.zeros(q.shape, bool)
+            edge[:, 1:] |= q[:, 1:] != q[:, :-1]
+            edge[1:, :] |= q[1:, :] != q[:-1, :]
+            ys, xs = np.nonzero(edge & ~ctx["land"])
+            for yy, xx in zip(ys[::2], xs[::2]):
+                img.putpixel((int(xx), int(yy)), col)
+
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    return buf.getvalue()
+
+
 # --- render generations: a new request supersedes the one in flight --------
 _gen = 0
 _gen_lock = threading.Lock()
@@ -1324,7 +1467,7 @@ def _progress(gen, stage, total, node):
 
 def render_now(gen=None):
     """render the current state into the in-memory PNG"""
-    global _png
+    global _png, _overlay
     if gen is None:
         with _gen_lock:
             gen = _gen
@@ -1362,6 +1505,11 @@ def render_now(gen=None):
             _png = buf.getvalue()
             _render["stamp"] += 1
         _render["times"] = ctx.get("times", {})
+        try:
+            _overlay = overlay_png(ctx) if is_current(gen) else None
+        except Exception as exp:
+            _overlay = None
+            print("overlay failed:", exp, flush=True)
     except _Cancelled:
         return False
     except Exception as exp:
@@ -1417,6 +1565,7 @@ align-items:center;justify-content:center;background:#0a1016}
 #prev img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;
 image-rendering:pixelated;pointer-events:none;user-select:none;-webkit-user-drag:none}
 #mapov{opacity:1;transition:none}
+#ovl{opacity:1}
 #prev{user-select:none}
 .node{padding:2px 5px;cursor:pointer;border-radius:3px;display:flex;gap:6px;align-items:center}
 .node.sel{background:#24405a}.node input{cursor:pointer}
@@ -1457,7 +1606,8 @@ input.off,select.off{opacity:.38}
     <button id=del title="delete the selected save">×</button><button id=reset>reset</button>
   </div>
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
-  <div id=prev><img id=img draggable=false><img id=mapov draggable=false></div>
+  <div id=prev><img id=img draggable=false><img id=mapov draggable=false>
+    <img id=ovl draggable=false></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
   <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div></div>
@@ -1487,6 +1637,9 @@ async function poll(){
       im.onerror=()=>{imgBusy=false;};
       im.src='/api/preview?t='+s.stamp;
       im.style.transform='none';
+      const ov=document.getElementById('ovl');
+      ov.src=hasOverlay()?('/api/overlay?t='+s.stamp):'';
+      ov.style.display=hasOverlay()?'block':'none';
       syncMap();
     }
     if(s.running)setTimeout(poll,250);
@@ -1496,6 +1649,9 @@ async function poll(){
   }
 }
 function render(){api('/api/render',{}).then(()=>poll());}
+function hasOverlay(){
+  let any=false; walkF(S.filters,f=>{ if(f.overlay) any=true; }); return any;
+}
 function mapUrl(r){
   return `/api/map?x0=${r.x0}&y0=${r.y0}&w=${Math.round(r.w)}&h=${Math.round(r.h)}&t=${Date.now()}`;
 }
@@ -1608,6 +1764,11 @@ async function select(id){sel=id; await api('/api/select',{id});
   const f=findFilter(id);
   document.getElementById('nodeTitle').textContent=f?fLabel(f):mLabel(id);
   renderParams(); renderNodes(); renderMasks();}
+const OVERLAY_KINDS={
+  currents:['flow','zones','speed'], drainage:['flow','accum'], warp:['vectors'],
+  basins:['zones','floor'], regions:['contours'], noise:['contours'],
+  features:['contours'], blur:['contours'], erode:['contours'], shelf:['contours']
+};
 const CHOICES={
   'nodes.height.mode':['profile','ramp'],
   'nodes.distance.down':['1','2']
@@ -1712,6 +1873,32 @@ function renderParams(){
       if(k in defs||['id','type','enabled','masks','out_curve','children','name'].includes(k)) continue;
       el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k,obj:filt}));
     }
+    const oh=document.createElement('h3'); oh.textContent='overlay';
+    el.appendChild(oh);
+    const orow=document.createElement('div'); orow.style.display='flex'; orow.style.gap='4px';
+    const osel=document.createElement('select');
+    const kinds=[''].concat(OVERLAY_KINDS[filt.type]||[]);
+    osel.innerHTML=kinds.map(k=>`<option value="${k}" ${k===(filt.overlay||'')?'selected':''}>`+
+      (k||'off')+`</option>`).join('');
+    osel.title='draw this filter\'s debug data over the preview (on release only)';
+    osel.onchange=()=>set('filters',filt.id,'overlay',osel.value);
+    orow.append(osel);
+    const col=document.createElement('input');
+    col.type='text'; col.value=filt.ov_colour||'255,205,120'; col.style.width='110px';
+    col.title='overlay colour, r,g,b';
+    col.onchange=()=>set('filters',filt.id,'ov_colour',col.value);
+    orow.append(col);
+    el.appendChild(orow);
+    const drow=document.createElement('div'); drow.style.display='flex'; drow.style.gap='6px';
+    for(const [k,lab] of [['ov_density','density'],['ov_length','length']]){
+      const l=document.createElement('label'); l.textContent=lab; l.style.margin='0';
+      const i=document.createElement('input'); i.type='number'; i.step='1';
+      i.value=filt[k]!==undefined?filt[k]:(k==='ov_density'?26:14);
+      i.style.width='64px'; i.onchange=()=>set('filters',filt.id,k,parseFloat(i.value));
+      drow.append(l,i);
+    }
+    el.appendChild(drow);
+
     const sh=document.createElement('h3'); sh.textContent='sub-filters';
     el.appendChild(sh);
     const row=document.createElement('div'); row.style.display='flex'; row.style.gap='4px';
@@ -1972,6 +2159,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+        elif self.path.startswith("/api/overlay"):
+            if _overlay is None:
+                self.send_response(204); self.end_headers()
+            else:
+                self._png(_overlay)
         elif self.path.startswith("/api/preview"):
             if _png is None:
                 self.send_response(204)
@@ -2045,7 +2237,7 @@ class Handler(BaseHTTPRequestHandler):
                 typ = body.get("type", "noise")
                 new = dict(id=f"f{n}", type=typ, enabled=True, name="",
                            masks=[], out_curve=[[0, 0], [1, 1]], children=[],
-                           **FILTER_DEFS[typ])
+                           **OVERLAY_DEFAULTS, **FILTER_DEFS[typ])
                 parent = find_filter(body["parent"]) if body.get("parent") else None
                 if parent is not None:
                     parent.setdefault("children", []).append(new)
