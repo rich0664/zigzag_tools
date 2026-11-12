@@ -135,6 +135,11 @@ FILTER_DEFS = {
     # deep points, and each patch gets its own level
     "basins": dict(threshold=60.0, spacing=120.0, levels=4, soft=40.0,
                    amp=0.4, seed=5, blend="lighter"),
+    # sediment carried by the coarse gyres: shoals trail downstream of islands
+    "currents": dict(reach=140.0, travel=45, strength=1.0, soft=3.0,
+                     deflect=0.30, deflect_reach=110.0, speed_bias=0.0,
+                     conserve=1.0, direction=0.0, core=0.0, feedback=0.0,
+                     surge=0, blend="add"),
 }
 
 DESC = {
@@ -192,6 +197,31 @@ DESC = {
                   "with blend lighter each patch is lifted to its own value, so low "
                   "values stay deep",
     "basins.seed": "different assignment of depths to patches",
+    "currents.reach": "how far from land sediment is picked up, in tiles",
+    "currents.travel": "how many advection steps it is carried for: more = longer "
+                       "plumes downstream",
+    "currents.strength": "how much the sediment moves the bottom: the shallow "
+                         "source band is eroded by the same amount that is "
+                         "deposited downstream, so this displaces rather than adds",
+    "currents.soft": "blur radius in tiles on the plume edges",
+    "currents.deflect": "how much the flow bends to follow the coast, 0 = pure "
+                        "gyre field, 1 = it hugs the shoreline",
+    "currents.deflect_reach": "how far the coastal bend reaches inland (tiles)",
+    "currents.direction": "0 = sediment is picked up evenly all round an island, "
+                          "1 = only on the flank the current runs into, so the lee "
+                          "side is deposition only",
+    "currents.core": "tiles of shoreline left untouched by the scour, so an island "
+                     "keeps its core instead of being planed away",
+    "currents.feedback": "0 = the gyres are fixed, 1 = the flow re-reads the "
+                         "bottom every step and bends around the shoals it builds",
+    "currents.surge": "steps between current reversals; 0 = one steady direction, "
+                      "6-15 = the flow swings back and forth like a tide so the "
+                      "shoal grows on both sides of an island",
+    "currents.conserve": "0 = sediment only ever adds height (the sea fills in), "
+                         "1 = every bit deposited is scoured from the shallows it "
+                         "came from, so depths move instead of rising",
+    "currents.speed_bias": "0 = deposit everywhere sediment arrives, 1 = only "
+                           "deposit in fast water, so calm gyre centres stay clear",
     "regions.amp": "how far a region can sit above or below the base depth",
     "regions.octaves": "detail within the regional field",
     "regions.seed": "different arrangement of regions",
@@ -285,6 +315,110 @@ def dist_full():
         else:
             _dist_full = False
     return None if _dist_full is False else _dist_full
+
+
+CURRENTS_CS = 16          # coarse cell size for the current field, in tiles
+_currents = None
+
+
+def _compute_currents():
+    """one coarse gyre per basin, relaxing around land; ~3s for the whole map"""
+    import heapq
+    land = load_map()
+    MH, MW = land.shape
+    df = dist_full()
+    if df is None:
+        raise RuntimeError("need out/sea/dist_full.npy (tools/build_dist.py)")
+    cs = CURRENTS_CS
+    ch, cw = MH // cs, MW // cs
+    land_c = np.array(Image.fromarray(land.astype(np.uint8) * 255)
+                      .resize((cw, ch), Image.BOX)) > 127
+    ds = sc.box_blur(np.asarray(df, dtype=np.float32), 30, 2)
+    coarse = np.array(Image.fromarray(ds, "F").resize((cw, ch), Image.BILINEAR))
+    del ds
+    peak = np.array(Image.fromarray(coarse, "F").filter(ImageFilter.MaxFilter(9)))
+    cand = (coarse >= peak) & (coarse > 40) & ~land_c
+    cand[:5, :] = False; cand[-5:, :] = False
+    cand[:, :5] = False; cand[:, -5:] = False
+    ys, xs = np.nonzero(cand)
+    order = np.argsort(-coarse[ys, xs])
+    seeds = []
+    for i in order:
+        y, x = ys[i], xs[i]
+        if all((y - py) ** 2 + (x - px) ** 2 > (120.0 / cs) ** 2 for py, px in seeds):
+            seeds.append((y, x))
+
+    lab = np.zeros((ch, cw), np.int32)
+    heap = []
+    for k, (y, x) in enumerate(seeds, start=1):
+        lab[y, x] = k
+        heapq.heappush(heap, (-float(coarse[y, x]), y, x))
+    while heap:
+        _, y, x = heapq.heappop(heap)
+        k = lab[y, x]
+        for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ny, nx = y + dy, x + dx
+            if 0 <= ny < ch and 0 <= nx < cw and lab[ny, nx] == 0:
+                lab[ny, nx] = k
+                heapq.heappush(heap, (-float(coarse[ny, nx]), ny, nx))
+
+    sizes = np.bincount(lab.ravel())
+    yy, xx = np.mgrid[0:ch, 0:cw].astype(np.float32)
+    psi = np.zeros((ch, cw), np.float32)
+    n = 0
+    for k in range(1, lab.max() + 1):
+        if sizes[k] * cs * cs < 40000:
+            continue
+        mk = lab == k
+        ys_, xs_ = np.nonzero(mk)
+        cy, cx = ys_.mean(), xs_.mean()
+        r = np.sqrt(sizes[k] / 3.14159265)
+        psi += (1.0 if n % 2 == 0 else -1.0) * np.exp(
+            -((yy - cy) ** 2 + (xx - cx) ** 2) / (2 * (0.75 * r) ** 2))
+        n += 1
+    for _ in range(500):
+        avg = 0.25 * (np.roll(psi, 1, 0) + np.roll(psi, -1, 0)
+                      + np.roll(psi, 1, 1) + np.roll(psi, -1, 1))
+        psi = np.where(land_c, 0.0, avg)
+    u, v = np.gradient(psi)
+    v = -v
+    mag = np.hypot(u, v)
+    mag[mag < 1e-9] = 1
+    u = (u / mag).astype(np.float32)
+    v = (v / mag).astype(np.float32)
+    u[land_c] = 0
+    v[land_c] = 0
+    return np.stack([u, v])
+
+
+def currents_field():
+    """(2, ch, cw) unit current vectors, built once and kept on disk"""
+    global _currents
+    if _currents is None:
+        path = os.path.join(WORK, "currents_uv.npy")
+        if os.path.exists(path):
+            try:
+                _currents = np.load(path)
+            except Exception:
+                _currents = _compute_currents()
+        else:
+            _currents = _compute_currents()
+            try:
+                np.save(path, _currents)
+            except Exception:
+                pass
+    return _currents
+
+
+def sample_bilinear(img, ys, xs):
+    h, w = img.shape
+    ys = np.clip(ys, 0, h - 1.001)
+    xs = np.clip(xs, 0, w - 1.001)
+    y0 = ys.astype(np.int32); x0 = xs.astype(np.int32)
+    fy = ys - y0; fx = xs - x0
+    y1 = np.minimum(y0 + 1, h - 1); x1 = np.minimum(x0 + 1, w - 1)
+    return ((1 - fy) * ((1 - fx) * img[y0, x0] + fx * img[y0, x1])
+            + fy * ((1 - fx) * img[y1, x0] + fx * img[y1, x1]))
 
 
 _map_rgba = None
@@ -472,6 +606,12 @@ def n_noise(node, ctx, prev_sig):
     n = sc.fbm(W, H, float(node["scale"]), int(node["octaves"]), seed=int(node["seed"])) - 0.5
     w = mask_weight(node, ctx) * float(node["amp"])
     c = 2.0 * w * n
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        d_ = dbg.setdefault(node["id"], {})
+        d_["bumps"] = np.clip(n + 0.5, 0, 1).astype(np.float32) * 2 - 1
+        d_["mask"] = np.broadcast_to(np.asarray(w, np.float32), h.shape).copy() \
+            if np.isscalar(w) else np.asarray(w, np.float32)
     return np.clip(h + c, 0, 1), c
 
 
@@ -482,6 +622,12 @@ def n_features(node, ctx, prev_sig):
     bumps = np.clip((n - float(node["density"])) / max(1e-3, 1.0 - float(node["density"])), 0, 1) ** 1.6
     w = mask_weight(node, ctx) * float(node["amp"])
     c = w * bumps
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        d_ = dbg.setdefault(node["id"], {})
+        d_["bumps"] = bumps.astype(np.float32)
+        d_["mask"] = np.broadcast_to(np.asarray(w, np.float32), h.shape).copy() \
+            if np.isscalar(w) else np.asarray(w, np.float32)
     return np.clip(h + c, 0, 1), c
 
 
@@ -502,6 +648,9 @@ def n_erode(node, ctx, prev_sig):
     he = sc.upscale(he, (W, H))
     mix = float(node["mix"]) * mask_weight(node, ctx)
     out = np.clip(h * (1 - mix) + he * mix, 0, 1)
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        dbg.setdefault(node["id"], {})["eroded"] = he.astype(np.float32)
     return out, out - h
 
 
@@ -510,6 +659,10 @@ def n_shelf(node, ctx, prev_sig):
     w = mask_weight(node, ctx)
     gain = 1.0 + (float(node["gain"]) - 1.0) * w
     out = np.clip(h ** float(node["power"]) * gain, 0, 1)
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        dbg.setdefault(node["id"], {})["gain"] = np.asarray(gain, np.float32).copy() \
+            if not np.isscalar(gain) else np.full(h.shape, float(gain), np.float32)
     return out, out - h
 
 
@@ -622,11 +775,27 @@ def n_drainage(node, ctx, prev_sig):
     for _ in range(max(1, int(node["steps"]))):
         check_cancel(ctx.get("gen", 0))
         rec, slope = flow_dirs(cur)
+        dbg = ctx.get("debug")
+        if dbg is not None and _ == 0:
+            yy, xx = np.mgrid[0:SH, 0:SW]
+            ry = np.where(rec >= 0, rec // SW, yy.ravel()).reshape(SH, SW)
+            rx = np.where(rec >= 0, rec % SW, xx.ravel()).reshape(SH, SW)
+            ang = np.arctan2((ry - yy) * -1.0, (rx - xx) * 1.0)
+            plane = np.array(Image.fromarray(ang.astype(np.float32), "F")
+                             .resize((W, H), Image.BICUBIC))
+            dbg.setdefault(node["id"], {})["flow"] = plane
         order = np.argsort(-cur.ravel(), kind="stable")
         acc = flow_accum(rec, order)
         A = (acc / max(1.0, float(acc.max()))) ** float(node["m"])
         S = np.clip(slope.ravel() / max(1e-6, float(slope.max())), 0, 1) ** float(node["n"])
         step = np.clip(float(node["k"]) * A * S, 0, float(node.get("cap", 0.1))).reshape(SH, SW)
+        dbg = ctx.get("debug")
+        if dbg is not None and _ == 0:
+            d_ = dbg.setdefault(node["id"], {})
+            up = lambda a: np.array(Image.fromarray(a.astype(np.float32), "F")
+                                    .resize((W, H), Image.BICUBIC))
+            d_["accum"] = up((acc / max(1.0, float(acc.max()))).reshape(SH, SW))
+            d_["slope"] = up(slope.reshape(SH, SW) / max(1e-6, float(slope.max())))
         cur = np.clip(cur - step, 0, 1)
         dh += step
 
@@ -648,6 +817,11 @@ def f_warp(h, node, ctx):
     xf = np.arange(W, dtype=np.float32)[None, :]
     rows = np.clip(yf + w1, 0, H - 1).astype(np.int32)
     cols = np.clip(xf + w2, 0, W - 1).astype(np.int32)
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        d_ = dbg.setdefault(node["id"], {})
+        d_["dx"] = w2.astype(np.float32)
+        d_["dy"] = w1.astype(np.float32)
     out = h[rows, cols]
     del rows, cols
     # a wired mask limits where the displacement applies
@@ -661,6 +835,7 @@ def f_regions(h, node, ctx):
     H, W = h.shape
     n = sc.fbm(W, H, max(8.0, float(node["scale"])),
                int(node.get("octaves", 3)), seed=int(node.get("seed", 7)))
+    raw_field = n.copy()
     lv = max(1, int(node.get("levels", 3)))
     # soft = width of the ramp between two levels, as a fraction of a level:
     # 0 gives the cliff edge of a clean terrace, 1 gives the smooth field back
@@ -677,6 +852,11 @@ def f_regions(h, node, ctx):
         f2 = f2 * f2 * (3.0 - 2.0 * f2)    # smoothstep the ramp, no creases
         n = (i + f2) / lv
     c = (n - 0.5) * float(node["amp"]) * mask_weight(node, ctx)
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        d_ = dbg.setdefault(node["id"], {})
+        d_["field"] = (raw_field * 2 - 1).astype(np.float32)
+        d_["levels"] = (n * 2 - 1).astype(np.float32)
     return np.clip(h + c, 0, 1).astype(np.float32), c.astype(np.float32)
 
 
@@ -732,17 +912,135 @@ def f_basins(h, node, ctx):
     # move needed to get there, so add sets the floor, lighter raises to it,
     # darker lowers to it
     target = (vals[lab] * float(node["amp"])).astype(np.float32)
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        d_ = dbg.setdefault(node["id"], {})
+        d_["labels"] = np.array(Image.fromarray(lab.astype(np.float32), "F")
+                               .resize((W, H), Image.NEAREST))
     target = np.array(Image.fromarray(target, "F").resize((W, H), Image.BILINEAR))
     r = int(max(0.0, float(node.get("soft", 40.0))))
     if r:
         target = sc.box_blur(target, r, 2)
     target[ctx["land"]] = 1.0                 # never pull land down
+    if dbg is not None:
+        dbg.setdefault(node["id"], {})["target"] = target.astype(np.float32)
     c = ((target - h) * mask_weight(node, ctx)).astype(np.float32)
+    return np.clip(h + c, 0, 1).astype(np.float32), c
+
+
+def f_currents(h, node, ctx):
+    """carry near-shore sediment along the basin gyres"""
+    d = ctx["d"]
+    H, W = h.shape
+    reg = ctx.get("region") or {"x0": 0, "y0": 0}
+    uv = currents_field()
+    cs = CURRENTS_CS
+    xs = ((np.arange(W) + int(reg["x0"])) / float(cs)).astype(np.float32)
+    ys = ((np.arange(H) + int(reg["y0"])) / float(cs)).astype(np.float32)
+    gx, gy = np.meshgrid(xs, ys)
+    u = sample_bilinear(uv[0], gy, gx)
+    v = sample_bilinear(uv[1], gy, gx)
+
+    # near a coast the flow turns to run along it
+    dgy, dgx = np.gradient(sc.box_blur(d, 10, 2))
+    near = float(node.get("deflect", 0.3)) * np.exp(
+        -d / max(1.0, float(node.get("deflect_reach", 110.0))))
+    u = u * (1 - near) + (-dgy) * near
+    v = v * (1 - near) + dgx * near
+    mag = np.hypot(u, v) + 1e-6
+    speed = mag.copy()             # before normalising: how fast the water moves
+    u /= mag
+    v /= mag
+
+    yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
+    # land is not sediment: d is 0 there, which would otherwise make the whole
+    # island interior the strongest possible source
+    src = (np.clip(1.0 - d / float(node["reach"]), 0, 1) ** 2) * (~ctx["land"])
+    direction = float(np.clip(float(node.get("direction", 0.0)), 0, 1))
+    if direction:
+        # the distance gradient points away from land, so a flow with a negative
+        # dot product is running *into* the coast: that is the windward flank
+        nd = np.hypot(dgy, dgx) + 1e-6
+        onshore = np.clip(-(u * dgy + v * dgx) / nd, 0, 1)
+        src = src * (1.0 - direction + direction * onshore)
+    # speed_bias weights the *deposition* by how fast the water is, so calm
+    # gyre centres stay clear instead of filling up
+    bias = float(node.get("speed_bias", 0.0))
+    if bias:
+        sn = np.clip(speed / max(1e-6, float(np.percentile(speed, 99))), 0, 1)
+        weight = 1.0 - bias + bias * sn
+    else:
+        weight = 1.0
+    feedback = float(np.clip(float(node.get("feedback", 0.0)), 0.0, 1.0))
+    surge = int(node.get("surge", 0))
+    cur = src.copy()
+    floor = h
+    for i in range(max(1, int(node["travel"]))):
+        uu, vv = u, v
+        if feedback:
+            # the current feels the bottom it is building: bend it along the
+            # contours of the *current* height, not the original distance
+            gy2, gx2 = np.gradient(sc.box_blur(floor, 8, 2))
+            nd = np.hypot(gx2, gy2) + 1e-6
+            uu = u * (1 - feedback) + (-gy2 / nd) * feedback
+            vv = v * (1 - feedback) + (gx2 / nd) * feedback
+            m2 = np.hypot(uu, vv) + 1e-6
+            uu = uu / m2
+            vv = vv / m2
+        if surge > 0 and (i // surge) % 2 == 1:
+            uu, vv = -uu, -vv          # the current reverses: tidal, monsoon
+        step_dep = sample_bilinear(cur, yy - vv * 6.0, xx - uu * 6.0)
+        cur = 0.5 * cur + 0.5 * step_dep
+        cur = np.maximum(cur, src) * 0.997
+        if feedback:
+            floor = np.clip(floor + 0.15 * step_dep, 0, 1)
+    cur = cur * weight
+    dep = np.clip(cur - src, 0, 1)          # where sediment arrived
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        d_ = dbg.setdefault(node["id"], {})
+        d_["u"] = u.astype(np.float32)
+        d_["v"] = (-v).astype(np.float32)
+        d_["speed"] = (speed / max(1e-6, float(np.percentile(speed, 99)))
+                       ).astype(np.float32)
+    r = int(max(0.0, float(node.get("soft", 3.0))))
+    if r:
+        dep = sc.box_blur(dep, r, 2)
+
+    # Sediment is moved, not created -- but only as much as `conserve` says.
+    #   0 = pure accumulation (the water just fills in)
+    #   1 = displacement (as much is scoured from the shallows as is deposited)
+    # The deposit is capped by the headroom under the shoreline, so it can never
+    # clip, and the scour is capped by the water actually there.
+    gain = np.asarray(float(node["strength"]) * mask_weight(node, ctx),
+                      dtype=np.float32)
+    conserve = float(np.clip(float(node.get("conserve", 1.0)), 0.0, 1.0))
+
+    room = np.clip(1.0 - h, 0.0, 1.0)
+    dep = np.minimum(dep * gain, room)          # what actually fits
+    landed = float(dep.sum())
+
+    band = src.copy()
+    core = float(node.get("core", 0.0))
+    if core > 0:
+        # fade the scour in over `core` tiles, so the shallows right against an
+        # island are left alone and only the outer shelf is rearranged
+        band = band * np.clip(d / core, 0.0, 1.0) ** 1.5
+    band = band / max(1e-6, float(band.sum()))
+    want = conserve * landed * band / np.maximum(gain, 1e-6) * gain
+    scour = np.minimum(want, h)                 # cannot dig below zero
+    if dbg is not None:
+        d_["deposit"] = dep.astype(np.float32)
+        d_["scour"] = scour.astype(np.float32)
+    c = (dep - scour).astype(np.float32)
     return np.clip(h + c, 0, 1).astype(np.float32), c
 
 
 def f_blur(h, node, ctx):
     b = sc.box_blur(h, max(1, int(round(float(node["radius"])))), 2)
+    dbg = ctx.get("debug")
+    if dbg is not None:
+        dbg.setdefault(node["id"], {})["blurred"] = b.astype(np.float32)
     # a wired mask limits the blur to that area instead of softening everything
     m = mask_weight(node, ctx)
     if not np.isscalar(m):
@@ -758,6 +1056,9 @@ def apply_filter(filt, ctx, h, times=None):
     val, contrib = FILTER_FN[filt["type"]](h, filt, sub)
     if contrib is None:                 # warp/blur transform the field itself
         contrib = val - h
+    # debug view: what this filter actually adds, before blending
+    ctx.setdefault("debug", {}).setdefault(filt["id"], {})["contribution"] = \
+        np.asarray(contrib, dtype=np.float32).copy()
     pts = filt.get("out_curve")
     if pts and len(pts) >= 2:
         contrib = apply_curve(contrib, pts)
@@ -784,6 +1085,7 @@ FILTER_FN = {
     "blur": f_blur,
     "regions": f_regions,
     "basins": f_basins,
+    "currents": f_currents,
     "features": _as_filter(n_features),
     "erode": _as_filter(n_erode),
     "drainage": _as_filter(n_drainage),
@@ -815,7 +1117,7 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
     region = region or STATE["region"]
     land, d = load_region(region, cancel=(lambda: check_cancel(gen)) if gen else None)
     ctx = {"land": land, "d": d, "h": None, "color": None, "fields": {},
-           "gen": gen, "region": region}
+           "gen": gen, "region": region, "debug": {}}
     steps = [("distance", None), ("height", None)]
     steps += [(f["id"], f) for f in STATE["filters"]]
     steps += [("palette", None), ("coast", None), ("output", None)]
@@ -898,7 +1200,77 @@ def evaluate(progress=None, stop_at=None, region=None, gen=0):
     return ctx
 
 
+DEBUG_LABELS = {
+    "contribution": "add / remove",
+    "u": "flow east", "v": "flow north", "speed": "flow speed",
+    "deposit": "deposited", "scour": "scoured",
+    "labels": "zones", "target": "zone floor",
+    "field": "raw field", "levels": "stepped",
+    "dx": "shift x", "dy": "shift y",
+    "bumps": "bumps", "mask": "mask weight",
+    "eroded": "eroded", "flow": "flow direction",
+    "accum": "drainage area", "slope": "slope",
+    "blurred": "blurred", "gain": "gain",
+}
+
+
+def debug_channels():
+    """[(channel key, label)] for every filter that has debug planes"""
+    out = []
+    for f in walk_filters(STATE["filters"]):
+        for key in sorted(DEBUG_KEYS.get(f["type"], ())):
+            name = f.get("name") or f["type"]
+            out.append((f"dbg:{f['id']}:{key}",
+                        f"{f['id']} {name} · {DEBUG_LABELS.get(key, key)}"))
+    return out
+
+
+DEBUG_KEYS = {
+    "noise": ("contribution", "mask"),
+    "features": ("contribution", "bumps", "mask"),
+    "blur": ("contribution", "blurred"),
+    "warp": ("contribution", "dx", "dy"),
+    "erode": ("contribution", "eroded"),
+    "drainage": ("contribution", "flow", "accum", "slope"),
+    "shelf": ("contribution", "gain"),
+    "regions": ("contribution", "field", "levels"),
+    "basins": ("contribution", "labels", "target"),
+    "currents": ("contribution", "u", "v", "speed", "deposit", "scour"),
+}
+
+
 def channel_image(ctx, channel):
+    if channel.startswith("dbg:"):
+        _, fid, key = channel.split(":", 2)
+        plane = (ctx.get("debug") or {}).get(fid, {}).get(key)
+        if plane is None:
+            return np.zeros((*ctx["land"].shape, 3), np.uint8)
+        v = np.asarray(plane, dtype=np.float32)
+        if v.ndim == 3:
+            return np.clip(v, 0, 255).astype(np.uint8)
+        # signed fields read as red (down) / blue (up) around zero;
+        # unsigned ones are stretched like the height channel
+        if key in ("labels", "levels"):
+            u, inv = np.unique(v, return_inverse=True)
+            if len(u) == 1:
+                g = np.full(v.shape, 110, np.uint8)     # a single zone is still a view
+            else:
+                g = (inv.reshape(v.shape) * (255.0 / (len(u) - 1))).astype(np.uint8)
+            return np.stack([g] * 3, -1)
+        if v.min() < -1e-6:
+            m = max(1e-6, float(np.abs(v).max()))
+            t = v / m
+            rgb = np.zeros((*v.shape, 3), np.float32)
+            rgb[..., 0] = np.clip(t, 0, 1) * 255          # positive = red
+            rgb[..., 2] = np.clip(-t, 0, 1) * 255         # negative = blue
+            rgb[..., 1] = np.clip(1 - np.abs(t), 0, 1) * 40
+            return rgb.astype(np.uint8)
+        lo, hi = float(v.min()), float(v.max())
+        if hi - lo < 1e-6:
+            g = np.full(v.shape, 128, np.uint8)
+            return np.stack([g] * 3, -1)
+        t = (v - lo) / (hi - lo)
+        return np.stack([t * 255] * 3, -1).astype(np.uint8)
     if channel in STATE["masks"]:
         v = mask_field(STATE["masks"][channel], ctx, ctx.get("h"))
         v = np.asarray(v, dtype=np.float32)
@@ -1152,7 +1524,9 @@ async function boot(){
   render();
 }
 function renderTop(){
-  chan.innerHTML=S.channels.map(c=>`<option ${c===S.channel?'selected':''}>${c}</option>`).join('');
+  const l=S.channel_labels||{};
+  chan.innerHTML=S.channels.map(c=>`<option value="${c}" ${c===S.channel?'selected':''}>`+
+    (l[c]||c)+`</option>`).join('');
 }
 let NODE_TIMES={};
 function paintTimes(t){
@@ -1645,7 +2019,15 @@ class Handler(BaseHTTPRequestHandler):
                       "filters": STATE["filters"], "filter_defs": FILTER_DEFS,
                       "order": ["distance", "height"] + [f["id"] for f in STATE["filters"]]
                                + ["palette", "coast", "output"],
-                      "channels": ["output", "h", "d", "color"] + list(STATE["masks"].keys()),
+                      "channels": (["output", "h", "d", "color"]
+                                   + list(STATE["masks"].keys())
+                                   + [c for c, _ in debug_channels()]),
+                      "channel_labels": dict(
+                          [("output", "output"), ("h", "height"), ("d", "distance"),
+                           ("color", "colour")]
+                          + [(m, (STATE["masks"][m].get("name") or m))
+                             for m in STATE["masks"]]
+                          + debug_channels()),
                       "taps": taps,
                       "desc": DESC, "io": NODE_IO,
                       "last": STATE.get("last", "erode"), "auto": _render["auto"]}
