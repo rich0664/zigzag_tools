@@ -40,7 +40,7 @@ _version = 0
 _png = None
 _render = {"running": False, "stage": 0, "total": 0, "node": "",
            "started": 0.0, "elapsed": 0.0, "stamp": 0, "last_ms": 0.0,
-           "error": None, "auto": False, "times": {}}
+           "error": None, "auto": False, "times": {}, "ov_stamp": 0}
 
 
 # --------------------------------------------------------------------------
@@ -1507,6 +1507,8 @@ def render_now(gen=None):
         _render["times"] = ctx.get("times", {})
         try:
             _overlay = overlay_png(ctx) if is_current(gen) else None
+            if _overlay is not None:
+                _render["ov_stamp"] += 1     # tell the client to reload it too
         except Exception as exp:
             _overlay = None
             print("overlay failed:", exp, flush=True)
@@ -1519,6 +1521,26 @@ def render_now(gen=None):
         if is_current(gen):
             _render.update(running=False, last_ms=int((time.time() - t0) * 1000),
                            elapsed=round(time.time() - t0, 2), node="done")
+    return True
+
+
+def render_overlay_now():
+    """rebuild just the overlay: cached nodes are reused, so this is cheap
+    unless a filter with an overlay has to run"""
+    global _overlay
+    try:
+        ctx = evaluate(region=dict(STATE["region"]))
+        ov = overlay_png(ctx)
+    except _Cancelled:
+        return False
+    except Exception as exp:
+        _render["ov_error"] = str(exp)
+        print("overlay failed:", exp, flush=True)
+        return False
+    with _lock:
+        _overlay = ov
+        _render["ov_stamp"] += 1
+        _render["ov_error"] = None
     return True
 
 
@@ -1610,9 +1632,10 @@ input.off,select.off{opacity:.38}
     <img id=ovl draggable=false></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
-  <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div></div>
+  <div id=curvewrap></div><h3>masks wired</h3><div id=wired></div>
+  <div id=ovparams></div></div>
 <script>
-let S=null, sel=null, lastStamp=-1, curveDrag=null, panDrag=null;
+let S=null, sel=null, lastStamp=-1, lastOv=-1, curveDrag=null, panDrag=null;
 async function api(path, body){const r=await fetch(path,{method:body?'POST':'GET',
   headers:{'content-type':'application/json'},body:body?JSON.stringify(body):undefined});
   return r.headers.get('content-type')?.includes('json')?r.json():r.text();}
@@ -1629,6 +1652,14 @@ async function poll(){
       :(s.error?('error: '+s.error)
         :(imgBusy?'loading image…':(s.last_ms?`${s.last_ms} ms`:'idle')));
     paintTimes(s.times||{});
+    if((s.ov_stamp||0)!==lastOv){
+      lastOv=s.ov_stamp||0;
+      const ov=document.getElementById('ovl');
+      if(hasOverlay()){
+        ov.src='/api/overlay?t='+lastOv;
+        ov.style.display='block';
+      } else { ov.removeAttribute('src'); ov.style.display='none'; }
+    }
     if(s.stamp!==lastStamp){
       lastStamp=s.stamp;
       const im=document.getElementById('img');
@@ -1637,9 +1668,6 @@ async function poll(){
       im.onerror=()=>{imgBusy=false;};
       im.src='/api/preview?t='+s.stamp;
       im.style.transform='none';
-      const ov=document.getElementById('ovl');
-      ov.src=hasOverlay()?('/api/overlay?t='+s.stamp):'';
-      ov.style.display=hasOverlay()?'block':'none';
       syncMap();
     }
     if(s.running)setTimeout(poll,250);
@@ -1832,6 +1860,7 @@ function field(kind,id,k,v,opts){
 function renderParams(){
   const el=document.getElementById('params'); el.innerHTML='';
   document.getElementById('curvewrap').innerHTML='';
+  document.getElementById('ovparams').innerHTML='';
   const node=S.nodes[sel], mask=S.masks[sel];
   const filt=findFilter(sel);
   if(mask){
@@ -1873,32 +1902,6 @@ function renderParams(){
       if(k in defs||['id','type','enabled','masks','out_curve','children','name'].includes(k)) continue;
       el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k,obj:filt}));
     }
-    const oh=document.createElement('h3'); oh.textContent='overlay';
-    el.appendChild(oh);
-    const orow=document.createElement('div'); orow.style.display='flex'; orow.style.gap='4px';
-    const osel=document.createElement('select');
-    const kinds=[''].concat(OVERLAY_KINDS[filt.type]||[]);
-    osel.innerHTML=kinds.map(k=>`<option value="${k}" ${k===(filt.overlay||'')?'selected':''}>`+
-      (k||'off')+`</option>`).join('');
-    osel.title='draw this filter\'s debug data over the preview (on release only)';
-    osel.onchange=()=>set('filters',filt.id,'overlay',osel.value);
-    orow.append(osel);
-    const col=document.createElement('input');
-    col.type='text'; col.value=filt.ov_colour||'255,205,120'; col.style.width='110px';
-    col.title='overlay colour, r,g,b';
-    col.onchange=()=>set('filters',filt.id,'ov_colour',col.value);
-    orow.append(col);
-    el.appendChild(orow);
-    const drow=document.createElement('div'); drow.style.display='flex'; drow.style.gap='6px';
-    for(const [k,lab] of [['ov_density','density'],['ov_length','length']]){
-      const l=document.createElement('label'); l.textContent=lab; l.style.margin='0';
-      const i=document.createElement('input'); i.type='number'; i.step='1';
-      i.value=filt[k]!==undefined?filt[k]:(k==='ov_density'?26:14);
-      i.style.width='64px'; i.onchange=()=>set('filters',filt.id,k,parseFloat(i.value));
-      drow.append(l,i);
-    }
-    el.appendChild(drow);
-
     const sh=document.createElement('h3'); sh.textContent='sub-filters';
     el.appendChild(sh);
     const row=document.createElement('div'); row.style.display='flex'; row.style.gap='4px';
@@ -1935,6 +1938,33 @@ function renderParams(){
         cb.checked?arr.add(mid):arr.delete(mid); set('filters',sel,'masks',[...arr]);};
       l.appendChild(cb); l.appendChild(document.createTextNode(mLabel(mid))); wired.appendChild(l);
     }
+    const box=document.getElementById('ovparams');
+    const oh=document.createElement('h3'); oh.textContent='overlay';
+    box.appendChild(oh);
+    const orow=document.createElement('div'); orow.style.display='flex'; orow.style.gap='4px';
+    const osel=document.createElement('select');
+    const kinds=[''].concat(OVERLAY_KINDS[filt.type]||[]);
+    osel.innerHTML=kinds.map(k=>`<option value="${k}" ${k===(filt.overlay||'')?'selected':''}>`+
+      (k||'off')+`</option>`).join('');
+    osel.title='draw this filter\'s debug data over the preview (on release only)';
+    osel.onchange=()=>set('filters',filt.id,'overlay',osel.value);
+    orow.append(osel);
+    const col=document.createElement('input');
+    col.type='text'; col.value=filt.ov_colour||'255,205,120'; col.style.width='110px';
+    col.title='overlay colour, r,g,b';
+    col.onchange=()=>set('filters',filt.id,'ov_colour',col.value);
+    orow.append(col);
+    box.appendChild(orow);
+    const drow=document.createElement('div'); drow.style.display='flex'; drow.style.gap='6px';
+    for(const [k,lab] of [['ov_density','density'],['ov_length','length']]){
+      const l=document.createElement('label'); l.textContent=lab; l.style.margin='0';
+      const i=document.createElement('input'); i.type='number'; i.step='1';
+      i.value=filt[k]!==undefined?filt[k]:(k==='ov_density'?26:14);
+      i.style.width='64px'; i.onchange=()=>set('filters',filt.id,k,parseFloat(i.value));
+      drow.append(l,i);
+    }
+    box.appendChild(drow);
+
   } else if(sel==='palette' && node){
     paletteEditor(node);
     return;
@@ -2055,6 +2085,9 @@ addEventListener('mouseup',()=>{ if(!curveDrag) return;
   draw(); cb(pts); });
 async function set(kind,id,k,v){
   await api('/api/set',{id,k,v}); S=await api('/api/state'); window.DESC=S.desc||{};
+  if(k==='overlay'||k==='ov_density'||k==='ov_length'||k==='ov_colour'){
+    api('/api/overlay',{}).then(()=>setTimeout(poll,150));
+  }
   // anything that changes what the panel draws (a reset curve, a new mode)
   // has to rebuild it; the curve canvas holds its own copy of the points
   if(k==='mode'||k==='source'||k==='enabled'||k==='out_curve') renderParams();
@@ -2364,6 +2397,8 @@ class Handler(BaseHTTPRequestHandler):
         # outside the state lock: never hold it while rendering
         if self.path == "/api/render":
             render_async()
+        elif self.path == "/api/overlay":
+            threading.Thread(target=render_overlay_now, daemon=True).start()
         elif self.path == "/api/set" and _render["auto"]:
             schedule_render()
         self._json({"ok": True})
