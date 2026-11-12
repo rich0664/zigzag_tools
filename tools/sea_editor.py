@@ -30,6 +30,7 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORK = os.path.join(ROOT, "out", "sea")
 MAP_PNG = os.path.join(WORK, "map.png")
 PRESETS = os.path.join(WORK, "presets")
+SNAPSHOTS = os.path.join(WORK, "snapshots")
 PORT = 3007   # override with --port
 
 _lock = threading.Lock()          # guards STATE mutation + preview bytes
@@ -483,6 +484,72 @@ def map_rgba():
         im.load()
         _map_rgba = im
     return _map_rgba
+
+
+def snapshot_list():
+    if not os.path.isdir(SNAPSHOTS):
+        return []
+    out = []
+    for f in os.listdir(SNAPSHOTS):
+        if not f.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(SNAPSHOTS, f)) as fh:
+                meta = json.load(fh)
+        except Exception:
+            continue
+        out.append({"id": f[:-5], "name": meta.get("name", f[:-5]),
+                    "time": meta.get("time", 0), "w": meta.get("w", 0),
+                    "h": meta.get("h", 0), "channel": meta.get("channel", "")})
+    out.sort(key=lambda m: m["time"])
+    return out
+
+
+def snapshot_save(name=""):
+    """keep the settings and the picture as it is right now"""
+    if _png is None:
+        raise ValueError("nothing rendered yet")
+    os.makedirs(SNAPSHOTS, exist_ok=True)
+    sid = time.strftime("%Y%m%d-%H%M%S") + "-" + str(int(time.time() * 1000) % 1000)
+    meta = {"name": name or sid, "time": time.time(),
+            "channel": STATE.get("channel", "output"),
+            "region": STATE.get("region"), "w": 0, "h": 0,
+            "state": {k: STATE[k] for k in STATE_KEYS if k in STATE}}
+    with open(os.path.join(SNAPSHOTS, sid + ".json"), "w") as f:
+        json.dump(meta, f)
+    with open(os.path.join(SNAPSHOTS, sid + ".png"), "wb") as f:
+        f.write(_png)
+    im = Image.open(io.BytesIO(_png)).convert("RGB")
+    meta["w"], meta["h"] = im.size
+    th = im.copy()
+    th.thumbnail((240, 160), Image.LANCZOS)
+    th.save(os.path.join(SNAPSHOTS, sid + "_thumb.png"))
+    with open(os.path.join(SNAPSHOTS, sid + ".json"), "w") as f:
+        json.dump(meta, f)
+    return sid
+
+
+def snapshot_load(sid):
+    path = os.path.join(SNAPSHOTS, sid + ".json")
+    with open(path) as f:
+        data = json.load(f)
+    st = data.get("state", {})
+    for k in ("region", "channel", "overlay_map", "world_noise", "next_mask",
+              "next_filter"):
+        if k in st:
+            STATE[k] = st[k]
+    for k in ("nodes", "masks"):
+        if k in st:
+            base = default_state()[k]
+            for nid, params in st[k].items():
+                if nid in base and isinstance(params, dict):
+                    base[nid].update(params)
+                else:
+                    base[nid] = params
+            STATE[k] = base
+    STATE["filters"] = st.get("filters", [])
+    normalise_filters(STATE["filters"])
+    _cache.clear()
 
 
 def load_region(region, cancel=None):
@@ -1756,6 +1823,21 @@ h3{margin:8px 0 4px;font-size:11px;color:#8fa6ba;text-transform:uppercase;letter
 #bar{height:100%;width:0;background:#2f6a8c;transition:width .12s linear}
 #prog{position:absolute;left:8px;top:0;line-height:18px;font-size:11px;color:#cfe0ee}
 canvas.curve{background:#0b1117;border:1px solid #2a3a4b;display:block;margin-top:4px}
+#roll{flex:0 0 auto;background:#0b1117;border-top:1px solid #22303d;padding:4px 6px;
+max-height:118px;overflow-x:auto;overflow-y:hidden}
+#rolltitle{font-size:10px;color:#7d93a6;letter-spacing:.06em;text-transform:uppercase;
+margin-bottom:3px}
+#rollinner{display:flex;gap:6px;align-items:flex-start}
+.snap{position:relative;flex:0 0 auto;cursor:pointer;border:1px solid #2a3a4b;
+border-radius:3px;overflow:hidden;background:#0f161d}
+.snap.here{border-color:#4f93bb;box-shadow:0 0 0 1px #4f93bb}
+.snap img{display:block;width:118px;height:72px;object-fit:cover;image-rendering:pixelated}
+.snap .n{position:absolute;left:2px;bottom:1px;font-size:9px;color:#dbe7f1;
+background:rgba(8,12,18,.75);padding:0 3px;border-radius:2px}
+.snap .b{position:absolute;top:1px;right:1px;font-size:10px;line-height:1;
+padding:1px 3px;background:rgba(8,12,18,.8);color:#cfe0ee;border:0;border-radius:2px;
+cursor:pointer}
+.snap .b:hover{background:#24405a}
 label.off{opacity:.38}
 input.off,select.off{opacity:.38}
 .small{color:#7d93a6}
@@ -1774,6 +1856,7 @@ input.off,select.off{opacity:.38}
     <select id=scale title="how many pixels per tile the preview is drawn at; the render is always 1:1"><option value=1>1 px/tile<option value=0.5>0.5 px (more area)</select>
     <select id=chan></select>
     <button id=go>render</button>
+    <button id=snap title="keep the current settings and picture in the film roll">snapshot</button>
     <label style="display:inline;color:var(--t)"><input id=auto type=checkbox> auto</label>
     <label style="display:inline;color:var(--t)" title="anchor noise to the map instead of the crop: previews then match a full render, at the cost of changing how existing presets look"><input id=wnoise type=checkbox> world noise</label>
     <select id=presets style="width:auto;min-width:90px"></select>
@@ -1783,6 +1866,8 @@ input.off,select.off{opacity:.38}
   <div id=barwrap><div id=bar></div><span id=prog></span></div>
   <div id=prev><img id=img draggable=false><img id=mapov draggable=false>
     <img id=ovl draggable=false></div>
+  <div id=roll><div id=rolltitle>snapshots <span class=small>(click to view, load to apply)</span></div>
+    <div id=rollinner></div></div>
 </div>
 <div id=right><h3 id=nodeTitle>select a node</h3><div id=params></div>
   <div id=curvewrap></div><h3 id=wiredH>masks wired</h3><div id=wired></div>
@@ -1820,6 +1905,7 @@ async function poll(){
     if(s.stamp!==lastStamp){
       lastStamp=s.stamp;
       const im=document.getElementById('img');
+      if(viewing) return;             // stay on the snapshot being compared
       imgBusy=true;
       im.onload=()=>{imgBusy=false;poll();};
       im.onerror=()=>{imgBusy=false;};
@@ -1861,6 +1947,7 @@ async function boot(){
   const ft=document.getElementById('ftype');
   if(ft) ft.innerHTML=Object.keys(S.filter_defs||{}).map(t=>`<option>${t}</option>`).join('');
   loadPresets();
+  loadRoll();
   const known=(S.filters||[]).some(f=>f.id===S.last)||S.nodes[S.last];
   select(known?S.last:((S.filters&&S.filters[0])?S.filters[0].id:'height'));
   render();
@@ -1959,6 +2046,14 @@ const OVERLAY_DENSITY_KINDS=['flow','vectors'];
 const CHOICES={
   'nodes.height.mode':['profile','ramp'],
   'nodes.distance.down':['1','2']
+};
+// enum parameters on filters, keyed type|param
+const FILTER_CHOICES={
+  'currents|source':['distance','height','slope'],
+  'noise|kind':['value','perlin','worley','ridged','billow','white'],
+  'features|kind':['value','perlin','worley','ridged','billow','white'],
+  'regions|kind':['value','perlin','worley','ridged','billow','white'],
+  'warp|kind':['value','perlin','worley','ridged','billow','white']
 };
 // a parameter nothing reads (wrong mode, wrong source, node switched off) is
 // shown greyed out, so the panel says which knobs currently do anything
@@ -2079,12 +2174,14 @@ function renderParams(){
     for(const [k,v] of Object.entries(defs)){
       if(k==='masks'||k==='out_curve') continue;
       el.append(...field('filter',filt.id,k,filt[k]!==undefined?filt[k]:v,
-        {dkey:filt.type+'.'+k,obj:filt}));
+        {dkey:filt.type+'.'+k,obj:filt,
+         options:FILTER_CHOICES[filt.type+'|'+k]}));
     }
     for(const [k,v] of Object.entries(filt)){
       if(k in defs||['id','type','enabled','masks','out_curve','children','name',
                      'overlay','ov_density','ov_length','ov_colour'].includes(k)) continue;
-      el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k,obj:filt}));
+      el.append(...field('filter',filt.id,k,v,{dkey:filt.type+'.'+k,obj:filt,
+        options:FILTER_CHOICES[filt.type+'|'+k]}));
     }
     const sh=document.createElement('h3'); sh.textContent='sub-filters';
     el.appendChild(sh);
@@ -2274,6 +2371,50 @@ async function set(kind,id,k,v){
   if(k==='name'){ renderNodes(); renderMasks(); }
   if(S.auto) setTimeout(poll,120); else poll();
 }
+let viewing=null;                 // snapshot id being looked at, or null for live
+async function loadRoll(){
+  const r=await api('/api/snapshots');
+  const box=document.getElementById('rollinner'); box.innerHTML='';
+  r.snapshots.forEach((sn,i)=>{
+    const d=document.createElement('div');
+    d.className='snap'+(viewing===sn.id?' here':'');
+    d.title=sn.name+'  ('+sn.w+'x'+sn.h+', '+sn.channel+')';
+    const im=document.createElement('img');
+    im.src='/api/snapshot/thumb?id='+encodeURIComponent(sn.id);
+    im.onclick=()=>viewSnapshot(sn.id);
+    const n=document.createElement('span'); n.className='n'; n.textContent='S'+(i+1);
+    const load=document.createElement('button'); load.className='b'; load.textContent='load';
+    load.title='put these settings into the editor';
+    load.onclick=e=>{e.stopPropagation(); api('/api/snapshot/load',{id:sn.id})
+      .then(()=>{viewing=null; return boot();});};
+    const del=document.createElement('button'); del.className='b'; del.textContent='×';
+    del.style.right='30px'; del.title='delete this snapshot';
+    del.onclick=e=>{e.stopPropagation(); if(!confirm('delete this snapshot?'))return;
+      api('/api/snapshot/del',{id:sn.id}).then(()=>{ if(viewing===sn.id) viewSnapshot(null);
+        loadRoll(); });};
+    d.append(im,n,load,del); box.appendChild(d);
+  });
+  const cur=document.createElement('div');
+  cur.className='snap'+(viewing===null?' here':'');
+  cur.title='back to the live render';
+  cur.innerHTML='<div style="width:118px;height:72px;display:flex;align-items:center;'+
+    'justify-content:center;color:#8fa6ba;font-size:11px">current</div>';
+  cur.onclick=()=>viewSnapshot(null);
+  box.prepend(cur);
+}
+function viewSnapshot(id){
+  viewing=id;
+  const im=document.getElementById('img');
+  if(id){ im.src='/api/snapshot/image?id='+encodeURIComponent(id); }
+  else { im.src='/api/preview?t='+lastStamp; }
+  loadRoll();
+}
+async function snap(){
+  await api('/api/snapshot',{});
+  viewing=null;
+  loadRoll();
+}
+document.getElementById('snap').onclick=snap;
 document.getElementById('go').onclick=render;
 document.getElementById('addmask').onclick=()=>api('/api/mask/add',{}).then(reload);
 document.getElementById('auto').onchange=e=>api('/api/auto',{on:e.target.checked});
@@ -2380,6 +2521,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(204); self.end_headers()
             else:
                 self._png(_overlay)
+        elif self.path.startswith("/api/snapshots"):
+            self._json({"snapshots": snapshot_list()})
+        elif self.path.startswith("/api/snapshot/thumb"):
+            from urllib.parse import urlparse, parse_qs
+            sid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+            path = os.path.join(SNAPSHOTS, os.path.basename(sid) + "_thumb.png")
+            if os.path.isfile(path):
+                self._png(open(path, "rb").read())
+            else:
+                self.send_response(404); self.end_headers()
+        elif self.path.startswith("/api/snapshot/image"):
+            from urllib.parse import urlparse, parse_qs
+            sid = parse_qs(urlparse(self.path).query).get("id", [""])[0]
+            path = os.path.join(SNAPSHOTS, os.path.basename(sid) + ".png")
+            if os.path.isfile(path):
+                self._png(open(path, "rb").read())
+            else:
+                self.send_response(404); self.end_headers()
         elif self.path.startswith("/api/preview"):
             if _png is None:
                 self.send_response(204)
@@ -2569,6 +2728,16 @@ class Handler(BaseHTTPRequestHandler):
                 pass          # started outside the lock, below
             elif self.path == "/api/select":
                 STATE["last"] = body.get("id")
+            elif self.path == "/api/snapshot":
+                snapshot_save(body.get("name", ""))
+            elif self.path == "/api/snapshot/del":
+                sid = os.path.basename(body.get("id", ""))
+                for suffix in (".json", ".png", "_thumb.png"):
+                    p_ = os.path.join(SNAPSHOTS, sid + suffix)
+                    if os.path.isfile(p_):
+                        os.remove(p_)
+            elif self.path == "/api/snapshot/load":
+                snapshot_load(os.path.basename(body.get("id", "")))
             elif self.path == "/api/preset/save":
                 os.makedirs(PRESETS, exist_ok=True)
                 name = os.path.basename(body["name"])
