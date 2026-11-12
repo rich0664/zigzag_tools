@@ -159,7 +159,8 @@ FILTER_DEFS = {
     "basins": dict(threshold=60.0, spacing=120.0, levels=4, soft=40.0,
                    amp=0.4, seed=5, blend="lighter"),
     # sediment carried by the coarse gyres: shoals trail downstream of islands
-    "currents": dict(reach=140.0, travel=45, strength=1.0, soft=3.0,
+    "currents": dict(source="distance", source_level=0.55, reach=140.0,
+                     travel=45, settle=0.997, step=6.0, strength=1.0, soft=3.0,
                      deflect=0.30, deflect_reach=110.0, speed_bias=0.0,
                      conserve=1.0, direction=0.0, core=0.0, feedback=0.0,
                      surge=0, blend="add"),
@@ -232,7 +233,17 @@ DESC = {
                   "with blend lighter each patch is lifted to its own value, so low "
                   "values stay deep",
     "basins.seed": "different assignment of depths to patches",
-    "currents.reach": "how far from land sediment is picked up, in tiles",
+    "currents.source": "distance = pick up in a band around every coast; "
+                       "height = only water shallower than source level; "
+                       "slope = only steep faces",
+    "currents.source_level": "for source=height: the depth below which sediment "
+                             "is picked up (1 = shoreline, 0.5 = mid shelf)",
+    "currents.settle": "fraction of sediment that survives each step: 0.997 "
+                       "settles close to the coast, 0.9995 carries it out over "
+                       "the slope",
+    "currents.step": "pixels travelled per advection step",
+    "currents.reach": "for source=distance: how far from land sediment is "
+                      "picked up, in tiles",
     "currents.travel": "how many advection steps it is carried for: more = longer "
                        "plumes downstream",
     "currents.strength": "how much the sediment moves the bottom: the shallow "
@@ -1009,7 +1020,20 @@ def f_currents(h, node, ctx):
     yy, xx = np.mgrid[0:H, 0:W].astype(np.float32)
     # land is not sediment: d is 0 there, which would otherwise make the whole
     # island interior the strongest possible source
-    src = (np.clip(1.0 - d / float(node["reach"]), 0, 1) ** 2) * (~ctx["land"])
+    # where sediment comes from. distance = a uniform band around every coast;
+    # height = only water shallow enough to be stirred; slope = only steep faces
+    mode = node.get("source", "distance")
+    wet = (~ctx["land"]).astype(np.float32)
+    if mode == "height":
+        lvl = float(np.clip(float(node.get("source_level", 0.55)), 0.01, 0.99))
+        src = (np.clip((h - lvl) / max(1e-6, 1.0 - lvl), 0, 1) ** 1.5) * wet
+    elif mode == "slope":
+        sy, sx = np.gradient(sc.box_blur(h, 2, 2))
+        sl = np.hypot(sx, sy)
+        ref = max(1e-3, float(np.percentile(sl[wet > 0], 95)))
+        src = (np.clip(sl / ref, 0, 1) ** 1.5) * wet
+    else:
+        src = (np.clip(1.0 - d / float(node["reach"]), 0, 1) ** 2) * wet
     direction = float(np.clip(float(node.get("direction", 0.0)), 0, 1))
     if direction:
         # the distance gradient points away from land, so a flow with a negative
@@ -1027,6 +1051,8 @@ def f_currents(h, node, ctx):
         weight = 1.0
     feedback = float(np.clip(float(node.get("feedback", 0.0)), 0.0, 1.0))
     surge = int(node.get("surge", 0))
+    settle = float(np.clip(float(node.get("settle", 0.997)), 0.9, 0.99995))
+    step_px = float(np.clip(float(node.get("step", 6.0)), 0.5, 40.0))
     cur = src.copy()
     floor = h
     for i in range(max(1, int(node["travel"]))):
@@ -1043,9 +1069,9 @@ def f_currents(h, node, ctx):
             vv = vv / m2
         if surge > 0 and (i // surge) % 2 == 1:
             uu, vv = -uu, -vv          # the current reverses: tidal, monsoon
-        step_dep = sample_bilinear(cur, yy - vv * 6.0, xx - uu * 6.0)
+        step_dep = sample_bilinear(cur, yy - vv * step_px, xx - uu * step_px)
         cur = 0.5 * cur + 0.5 * step_dep
-        cur = np.maximum(cur, src) * 0.997
+        cur = np.maximum(cur, src) * settle
         if feedback:
             floor = np.clip(floor + 0.15 * step_dep, 0, 1)
     cur = cur * weight
@@ -1951,6 +1977,8 @@ function inactiveParam(kind,id,k,o){
   if(kind==='filter'){
     if(o.enabled===false) return true;
     if(o.type==='currents'&&k==='deflect_reach') return !(o.deflect>0);
+    if(o.type==='currents'&&k==='reach') return o.source!=='distance';
+    if(o.type==='currents'&&k==='source_level') return o.source!=='height';
     return false;
   }
   if(kind==='mask'){
