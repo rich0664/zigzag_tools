@@ -1191,7 +1191,11 @@ def f_currents(h, node, ctx):
         cur = 0.5 * cur + 0.5 * step_dep
         cur = np.maximum(cur, src_t) * settle
         if feedback:
-            floor = np.clip(floor + 0.15 * step_dep, 0, 1)
+            # The floor the flow reads is the base height *plus the plume as it
+            # is now*. It used to accumulate 0.15 x step every step, which hit
+            # 1.0 within a few iterations; after that the gradient was flat, the
+            # blend collapsed to the static gyre and the weight stopped mattering.
+            floor = np.clip(h_t + 0.6 * cur, 0, 1)
 
     if s > 1:
         dep = sc.upscale(np.clip(cur - src_t, 0, 1), (W, H)) * weight
