@@ -1905,12 +1905,16 @@ async function poll(){
     if(s.stamp!==lastStamp){
       lastStamp=s.stamp;
       const im=document.getElementById('img');
-      if(viewing) return;             // stay on the snapshot being compared
-      imgBusy=true;
-      im.onload=()=>{imgBusy=false;poll();};
-      im.onerror=()=>{imgBusy=false;};
-      im.src='/api/preview?t='+s.stamp;
-      im.style.transform='none';
+      // while a snapshot is open the live image is left alone, but polling keeps
+      // going: returning here used to kill the poll loop, which is why going
+      // back to 'current' could show a stale picture
+      if(!viewing){
+        imgBusy=true;
+        im.onload=()=>{imgBusy=false;poll();};
+        im.onerror=()=>{imgBusy=false;};
+        im.src='/api/preview?t='+s.stamp;
+        im.style.transform='none';
+      }
       syncMap();
     }
     if(s.running||s.ov_running)setTimeout(poll,250);
