@@ -288,7 +288,7 @@
     deck.parentNode.insertBefore(canvas, deck);
 
     const gl = canvas.getContext('webgl2', {
-      alpha: false, premultipliedAlpha: false, antialias: false, depth: false,
+      alpha: true, premultipliedAlpha: false, antialias: false, depth: false,
     });
     if (!gl) { canvas.remove(); throw new Error('webgl2 unavailable'); }
 
@@ -506,7 +506,10 @@
       const px = new Uint8Array(w * h * 4);
       glc.gl.readPixels(0, 0, w, h, glc.gl.RGBA, glc.gl.UNSIGNED_BYTE, px);
 
-      // flip the bottom-up GL rows into a top-down 2D canvas
+      // flip the bottom-up GL rows into a top-down 2D canvas. readPixels
+      // returns the straight-alpha bytes the shader wrote (the context is not
+      // premultiplied); putImageData takes straight alpha, so toDataURL keeps
+      // the transparent margin transparent instead of flattening it.
       const out = document.createElement('canvas');
       out.width = w;
       out.height = h;
