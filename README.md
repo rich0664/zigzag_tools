@@ -40,9 +40,13 @@ notifications button; click it for the sea settings panel (outside click or
 `Escape` closes it). To toggle it from the console:
 
 ```js
-window.__zzSea.on = false   // off
-window.__zzSea.on = true    // on
+window.__zzSea.setOn(false)      // off
+window.__zzSea.setOn(true)       // on (restarts the loop / deferred build)
+window.__zzSea.setMode('low')    // quality mode, see the ids below
+window.__zzSea.on                // current state; read it, use setOn to change it
 ```
+
+`setMode` takes `baseline`, `medium`, `low`, `extra-low` or `static`.
 
 The panel holds, in order: sea on/off; quality; opacity (0–100); brightness
 (50–150%); and a **30 fps limit** toggle. Every choice is remembered in
@@ -80,11 +84,11 @@ It loads the colour map plus, for animated modes, four baked shader textures
 
 | file | size (px) | size |
 |---|---|---:|
-| `dist/zigzag-sea.webp` | 7749 × 5254 | 2.03 MB |
-| `dist/zigzag-sea-dist.webp` | 7749 × 5254 | 3.20 MB |
-| `dist/zigzag-sea-aux.webp` | 3875 × 2627 | 6.77 MB |
-| `dist/zigzag-sea-flow.webp` | 484 × 328 | 0.19 MB |
-| `dist/zigzag-sea-speed.webp` | 1937 × 1313 | 0.55 MB |
+| `dist/zigzag-sea.webp` | 7749 × 5254 | 2.034 MB |
+| `dist/zigzag-sea-dist.webp` | 7749 × 5254 | 3.204 MB |
+| `dist/zigzag-sea-aux.webp` | 3875 × 2627 | 6.773 MB |
+| `dist/zigzag-sea-flow.webp` | 484 × 328 | 0.187 MB |
+| `dist/zigzag-sea-speed.webp` | 1937 × 1313 | 0.555 MB |
 
 `dist.webp` is √(distance / 600), `aux.webp` is depth + the along-coast
 vector, `flow.webp` the 16-tile gyre field and `speed.webp` the baked speed
