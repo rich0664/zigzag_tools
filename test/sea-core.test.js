@@ -1,0 +1,232 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import {
+  MODE_IDS, modeSettings, pickMode, parseState, renderSize,
+  cameraUniforms, fpsGate, assetUrl,
+} from '../src/sea-core.js';
+import seaConsts from '../src/sea-consts.json' with { type: 'json' };
+
+const near = (a, b, eps = 1e-9) => Math.abs(a - b) <= eps;
+
+describe('modeSettings', () => {
+  it('baseline carries the tuned values', () => {
+    const s = modeSettings('baseline');
+    assert.equal(s.shader, true);
+    assert.equal(s.renderScale, 1);
+    assert.equal(s.uniforms.par, 0.814);
+    assert.equal(s.uniforms.pom, 5);
+    assert.equal(s.uniforms.warp, 3.3);
+    assert.equal(s.uniforms.flowMode, 1);   // LOD
+    assert.equal(s.uniforms.noiseLayers, 2);
+  });
+
+  it('medium only removes parallax', () => {
+    assert.equal(modeSettings('medium').uniforms.par, 0);
+    assert.equal(modeSettings('medium').uniforms.pom, 1);
+    assert.equal(modeSettings('medium').uniforms.warp, 3.3);
+  });
+
+  it('low drops LOD, one noise layer and warp', () => {
+    const u = modeSettings('low').uniforms;
+    assert.equal(u.flowMode, 0);
+    assert.equal(u.noiseLayers, 1);
+    assert.equal(u.warp, 0);
+    assert.equal(u.par, 0);
+  });
+
+  it('extra-low is low at half scale', () => {
+    assert.equal(modeSettings('extra-low').renderScale, 0.5);
+    assert.deepEqual(modeSettings('extra-low').uniforms, modeSettings('low').uniforms);
+  });
+
+  it('static needs no shader', () => {
+    const s = modeSettings('static');
+    assert.equal(s.shader, false);
+    assert.equal(s.renderScale, 1);
+    assert.equal(s.uniforms, null);
+  });
+
+  it('rejects unknown ids', () => {
+    assert.throws(() => modeSettings('nope'));
+  });
+
+  it('exposes the five mode ids', () => {
+    assert.deepEqual(MODE_IDS, ['baseline', 'medium', 'low', 'extra-low', 'static']);
+  });
+
+  it('uniforms carry exactly the shader keys, from the baseline table', () => {
+    const keys = [
+      'shore', 'shelf', 'flow', 'wave', 'grain', 'foam', 'deep', 'swell',
+      'adir', 'aspeed', 'ascale', 'bdir', 'bspeed', 'bscale', 'par', 'pom',
+      'dslow', 'win', 'wout', 'cycle', 'warp', 'wbias', 'deflect', 'deflectReach',
+      'flowMode', 'noiseLayers', 'travelMax', 'snap',
+    ];
+    const u = modeSettings('baseline').uniforms;
+    assert.deepEqual(Object.keys(u).sort(), keys.slice().sort());
+    for (const [k, v] of Object.entries(seaConsts.baseline)) assert.equal(u[k], v);
+    assert.equal(u.travelMax, 0);
+    assert.equal(u.snap, 1);
+  });
+
+  it('returns a fresh object each call', () => {
+    const a = modeSettings('baseline');
+    a.uniforms.shore = -1;
+    assert.equal(modeSettings('baseline').uniforms.shore, seaConsts.baseline.shore);
+    assert.notEqual(modeSettings('baseline').uniforms, modeSettings('baseline').uniforms);
+  });
+});
+
+describe('pickMode', () => {
+  const good = { webgl2: true, maxTextureSize: 16384, coarsePointer: false, narrow: false };
+
+  it('lets a saved id win', () => {
+    assert.equal(pickMode('low', { ...good, webgl2: false }), 'low');
+    assert.equal(pickMode('static', good), 'static');
+  });
+
+  it('falls back to static without WebGL2', () => {
+    assert.equal(pickMode('', { ...good, webgl2: false }), 'static');
+  });
+
+  it('falls back to static on small texture limits', () => {
+    assert.equal(pickMode('', { ...good, maxTextureSize: 4096 }), 'static');
+    assert.equal(pickMode('', { ...good, maxTextureSize: 8191 }), 'static');
+    assert.equal(pickMode('', { ...good, maxTextureSize: 8192 }), 'baseline');
+  });
+
+  it('falls back to static on touch and narrow viewports', () => {
+    assert.equal(pickMode('', { ...good, coarsePointer: true }), 'static');
+    assert.equal(pickMode('', { ...good, narrow: true }), 'static');
+  });
+
+  it('uses baseline when everything is fine, and ignores unknown saved ids', () => {
+    assert.equal(pickMode('', good), 'baseline');
+    assert.equal(pickMode('nope', good), 'baseline');
+    assert.equal(pickMode(null, good), 'baseline');
+  });
+});
+
+describe('parseState', () => {
+  it('applies defaults for nulls and missing keys', () => {
+    assert.deepEqual(parseState({ mode: null, on: null, opacity: null, brightness: null, fps30: null }), {
+      mode: '', on: true, opacity: 1, brightness: 1, fps30: false,
+    });
+    assert.deepEqual(parseState({}), { mode: '', on: true, opacity: 1, brightness: 1, fps30: false });
+  });
+
+  it('drops unparseable numbers and unknown modes', () => {
+    const s = parseState({ mode: 'nope', opacity: 'NaN', brightness: 'NaN' });
+    assert.equal(s.mode, '');
+    assert.equal(s.opacity, 1);
+    assert.equal(s.brightness, 1);
+  });
+
+  it('keeps valid values and clamps them', () => {
+    assert.equal(parseState({ mode: 'extra-low' }).mode, 'extra-low');
+    assert.equal(parseState({ opacity: '150' }).opacity, 1);
+    assert.equal(parseState({ opacity: '-1' }).opacity, 0);
+    assert.equal(parseState({ opacity: '0.4' }).opacity, 0.4);
+    // saved brightness is a percentage (menu 50–150), returned as a multiplier
+    assert.equal(parseState({ brightness: '20' }).brightness, 0.5);
+    assert.equal(parseState({ brightness: '120' }).brightness, 1.2);
+    assert.equal(parseState({ brightness: '200' }).brightness, 1.5);
+  });
+
+  it('reads the fps flag and the on/off switch', () => {
+    assert.equal(parseState({ fps30: '1' }).fps30, true);
+    assert.equal(parseState({ fps30: 'true' }).fps30, true);
+    assert.equal(parseState({ fps30: true }).fps30, true);
+    assert.equal(parseState({ fps30: '0' }).fps30, false);
+    assert.equal(parseState({ on: '0' }).on, false);
+    assert.equal(parseState({ on: 'false' }).on, false);
+    assert.equal(parseState({ on: '1' }).on, true);
+  });
+});
+
+describe('renderSize', () => {
+  it('caps the long edge and reports the backing scale', () => {
+    const s = renderSize(1920, 1080, 2, 1);
+    assert.deepEqual([s.w, s.h], [2560, 1440]);
+    assert.ok(near(s.scale, 2560 / 1920));
+  });
+
+  it('leaves a phone-sized viewport alone when under the cap', () => {
+    const s = renderSize(390, 844, 3, 1);
+    assert.deepEqual([s.w, s.h], [1170, 2532]);
+    assert.equal(s.scale, 3);
+  });
+
+  it('caps tall viewports on the height', () => {
+    const s = renderSize(1000, 3000, 1, 1);
+    assert.deepEqual([s.w, s.h], [853, 2560]);
+  });
+
+  it('halves the backing store for extra-low', () => {
+    const s = renderSize(1920, 1080, 2, 0.5);
+    assert.deepEqual([s.w, s.h], [1280, 720]);
+    assert.ok(near(s.scale, 1280 / 1920));
+  });
+});
+
+describe('cameraUniforms', () => {
+  const vs = (zoom, padding) => ({ zoom, target: [100, 200], padding });
+
+  it('maps an unpadded view centre to the canvas centre', () => {
+    const c = cameraUniforms(vs(3, { left: 0, right: 0, top: 0, bottom: 0 }), 1000, 500, 2000, 1000);
+    assert.equal(c.zoomPx, 16);          // 2**3 * (2000 / 1000)
+    assert.equal(c.centerX, 1000);
+    assert.equal(c.centerY, 500);
+    assert.equal(c.viewW, 2000);
+    assert.equal(c.viewH, 1000);
+  });
+
+  it('keeps the padded centre on the canvas centre', () => {
+    const c = cameraUniforms(vs(0, { left: 68, right: 68 }), 1000, 500, 1000, 500);
+    assert.equal(c.centerX, 500);
+    assert.equal(c.zoomPx, 1);
+  });
+
+  it('shifts the centre by half of the asymmetric padding', () => {
+    const c = cameraUniforms(vs(0, { left: 68 }), 1000, 500, 1000, 500);
+    assert.equal(c.centerX, 534);
+    const c2 = cameraUniforms(vs(0, { top: 40 }), 1000, 500, 2000, 1000);
+    assert.equal(c2.centerY, 540);
+  });
+});
+
+describe('fpsGate', () => {
+  it('draws every frame without the gate', () => {
+    assert.equal(fpsGate(0, 0, false).draw, true);
+    assert.equal(fpsGate(100, 200, false).draw, true);
+  });
+
+  it('admits one frame per 33.3 ms with the gate', () => {
+    const first = fpsGate(0, 0, true);
+    assert.equal(first.draw, true);
+    assert.ok(near(first.nextAt, 1000 / 30));
+
+    const early = fpsGate(16.7, first.nextAt, true);
+    assert.equal(early.draw, false);
+    assert.equal(early.nextAt, first.nextAt);
+
+    const due = fpsGate(33.4, first.nextAt, true);
+    assert.equal(due.draw, true);
+    assert.ok(near(due.nextAt, 33.4 + 1000 / 30));
+  });
+});
+
+describe('assetUrl', () => {
+  it('carries the asset base and version', () => {
+    assert.equal(
+      assetUrl('zigzag-sea-dist.webp'),
+      `${seaConsts.assetBase}/zigzag-sea-dist.webp?v=${seaConsts.version}`,
+    );
+    assert.match(assetUrl('zigzag-sea-dist.webp'), /\?v=0\.3\.0$/);
+  });
+
+  it('versions every shader texture', () => {
+    for (const name of ['dist', 'aux', 'flow', 'speed']) {
+      assert.match(assetUrl(`zigzag-sea-${name}.webp`), /\?v=0\.3\.0$/);
+    }
+  });
+});
