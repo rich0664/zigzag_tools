@@ -45,7 +45,7 @@
       webgl2: false, maxTextureSize: 0, coarsePointer: false, narrow: false,
     }),
     img: null, raf: 0, sig: '', draws: 0,
-    opacity: saved.opacity, brightness: saved.brightness,
+    opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
     glReady: false, error: null,
   };
   window.__zzSea = state;
@@ -76,6 +76,7 @@
     }
     ov.style.cssText = (deck.getAttribute('style') || '') + ';pointer-events:none';
     ov.style.opacity = String(state.opacity);
+    ov.style.filter = `brightness(${state.brightness})`;
     // work in CSS pixels: quality settings and devicePixelRatio change the
     // canvas backing store, which would otherwise shift the projection
     const cw = deck.clientWidth || deck.width;
@@ -164,6 +165,7 @@
   // ---- GL path -------------------------------------------------------------
 
   let glc = null;
+  let nextAt = 0;                 // fps gate clock, ms; 0 admits the first frame
 
   function compile(gl, type, src) {
     const s = gl.createShader(type);
@@ -387,6 +389,28 @@
     gl.drawArrays(gl.TRIANGLES, 0, 3);
   }
 
+  // The backing store follows the deck CSS size and the tier's render scale.
+  // Only the drawing buffer changes on a tier switch; the program and every
+  // texture survive, so the next frame redraws with new uniforms alone.
+  function sizeGL(renderScale) {
+    if (!glc) return null;
+    const deck = deckCanvas();
+    if (!deck) return null;
+    const cssW = deck.clientWidth || deck.width;
+    const cssH = deck.clientHeight || deck.height;
+    if (!cssW || !cssH) return null;
+
+    const { w, h, scale } = renderSize(
+      cssW, cssH, window.devicePixelRatio || 1, renderScale,
+    );
+    const canvas = glc.canvas;
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+    }
+    return { cssW, cssH, w, h, scale };
+  }
+
   function drawGL(t) {
     if (!glc || !glc.ready) return;
     const deck = deckCanvas();
@@ -394,9 +418,10 @@
     const vs = viewState(deck);
     if (!vs) return;
 
-    const cssW = deck.clientWidth || deck.width;
-    const cssH = deck.clientHeight || deck.height;
-    if (!cssW || !cssH) return;
+    const settings = modeSettings(state.mode);
+    const sized = sizeGL(settings.renderScale);
+    if (!sized) return;
+    const { cssW, cssH, w, h, scale } = sized;
 
     const canvas = glc.canvas;
     if (canvas.parentNode !== deck.parentNode || canvas.nextElementSibling !== deck) {
@@ -409,13 +434,6 @@
       canvas.style.cssText = css;
     }
 
-    const dpr = window.devicePixelRatio || 1;
-    const settings = modeSettings(state.mode);
-    const { w, h, scale } = renderSize(cssW, cssH, dpr, settings.renderScale);
-    if (canvas.width !== w || canvas.height !== h) {
-      canvas.width = w;
-      canvas.height = h;
-    }
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
     renderFrame(glc, w, h, {
       tx: vs.target[0], ty: vs.target[1],
@@ -429,7 +447,12 @@
     if (!glc) return;
     glc.raf = 0;
     if (state.mode === 'static' || !state.on || document.hidden) return;
-    try { drawGL(now / 1000); } catch (e) { fallbackToStatic(e); return; }
+    // the loop still runs every rAF; the gate decides which frames draw
+    const gate = fpsGate(now, nextAt, state.fps30);
+    nextAt = gate.nextAt;
+    if (gate.draw) {
+      try { drawGL(now / 1000); } catch (e) { fallbackToStatic(e); return; }
+    }
     glc.raf = requestAnimationFrame(glTick);
   }
 
@@ -468,8 +491,12 @@
     } else {
       stopStatic();
       removeStaticCanvas();
-      if (glc) startGL();
-      else {
+      if (glc) {
+        // tier switch: same program and textures, new backing store; the loop
+        // re-applies uniforms from modeSettings on the next frame
+        sizeGL(modeSettings(id).renderScale);
+        startGL();
+      } else {
         try { buildGL(); } catch (e) { fallbackToStatic(e); }
       }
     }
@@ -493,31 +520,38 @@
 
     const canvas = glc.canvas;
     const prevW = canvas.width, prevH = canvas.height;
+    // width/height are the camera extent in CSS-style pixels; extra-low renders
+    // the same view into half the backing store, as the live tier does
+    const settings = modeSettings(state.mode);
+    const scale = settings.renderScale;
+    const bw = Math.max(1, Math.round(w * scale));
+    const bh = Math.max(1, Math.round(h * scale));
     try {
-      if (canvas.width !== w || canvas.height !== h) {
-        canvas.width = w;
-        canvas.height = h;
+      if (canvas.width !== bw || canvas.height !== bh) {
+        canvas.width = bw;
+        canvas.height = bh;
       }
-      renderFrame(glc, w, h, {
+      renderFrame(glc, bw, bh, {
         tx, ty,
-        zoom, zoomCss: zoom, centerX: w / 2, centerY: h / 2,
-      }, t, modeSettings(state.mode));
+        zoom: zoom * scale, zoomCss: zoom,
+        centerX: bw / 2, centerY: bh / 2,
+      }, t, settings);
 
-      const px = new Uint8Array(w * h * 4);
-      glc.gl.readPixels(0, 0, w, h, glc.gl.RGBA, glc.gl.UNSIGNED_BYTE, px);
+      const px = new Uint8Array(bw * bh * 4);
+      glc.gl.readPixels(0, 0, bw, bh, glc.gl.RGBA, glc.gl.UNSIGNED_BYTE, px);
 
       // flip the bottom-up GL rows into a top-down 2D canvas. readPixels
       // returns the straight-alpha bytes the shader wrote (the context is not
       // premultiplied); putImageData takes straight alpha, so toDataURL keeps
       // the transparent margin transparent instead of flattening it.
       const out = document.createElement('canvas');
-      out.width = w;
-      out.height = h;
+      out.width = bw;
+      out.height = bh;
       const ctx = out.getContext('2d');
-      const img = ctx.createImageData(w, h);
-      const row = w * 4;
-      for (let y = 0; y < h; y++) {
-        img.data.set(px.subarray((h - 1 - y) * row, (h - y) * row), y * row);
+      const img = ctx.createImageData(bw, bh);
+      const row = bw * 4;
+      for (let y = 0; y < bh; y++) {
+        img.data.set(px.subarray((bh - 1 - y) * row, (bh - y) * row), y * row);
       }
       ctx.putImageData(img, 0, 0);
       return out.toDataURL('image/png');
@@ -532,8 +566,42 @@
     }
   }
 
+  // ---- menu-facing setters -------------------------------------------------
+  // Brightness arrives as the menu percentage (50..150) and is stored as the
+  // multiplier the shader and CSS use (parseState returns the same unit).
+  function setBrightness(percent) {
+    const v = Number(percent);
+    state.brightness = clamp(isFinite(v) ? v / 100 : 1, 0.5, 1.5);
+    const ov = document.getElementById(OV_ID);
+    if (ov) ov.style.filter = `brightness(${state.brightness})`;
+    return state.brightness;
+  }
+
+  // Opacity is a CSS style on whichever canvas is live; the GL loop rewrites
+  // its inline style from `glc.css` each frame, so clear the cache too.
+  function setOpacity(value) {
+    const v = Number(value);
+    state.opacity = clamp(isFinite(v) ? v : 1, 0, 1);
+    const ov = document.getElementById(OV_ID);
+    if (ov) ov.style.opacity = String(state.opacity);
+    if (glc) {
+      glc.css = '';
+      glc.canvas.style.opacity = String(state.opacity);
+    }
+    return state.opacity;
+  }
+
+  function setFps30(on) {
+    state.fps30 = !!on;
+    nextAt = 0;                    // the next rAF draws immediately
+    return state.fps30;
+  }
+
   state.setMode = setMode;
   state.debugRender = debugRender;
+  state.setFps30 = setFps30;
+  state.setBrightness = setBrightness;
+  state.setOpacity = setOpacity;
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); }

@@ -68,6 +68,34 @@ describe('modeSettings', () => {
     assert.equal(u.snap, 1);
   });
 
+  it('animated tiers differ from baseline only in the tier keys', () => {
+    const tierKeys = ['par', 'pom', 'warp', 'flowMode', 'noiseLayers'];
+    const base = modeSettings('baseline').uniforms;
+    for (const id of ['medium', 'low', 'extra-low']) {
+      const u = modeSettings(id).uniforms;
+      assert.deepEqual(Object.keys(u).sort(), Object.keys(base).sort(), `${id} key set`);
+      for (const k of Object.keys(base)) {
+        if (tierKeys.includes(k)) continue;
+        assert.equal(u[k], base[k], `${id} changes ${k}`);
+      }
+    }
+    // only par/pom differ at medium; low adds warp/flowMode/noiseLayers
+    assert.deepEqual(
+      Object.keys(base).filter(k => modeSettings('medium').uniforms[k] !== base[k]).sort(),
+      ['par', 'pom'],
+    );
+    assert.deepEqual(
+      Object.keys(base).filter(k => modeSettings('low').uniforms[k] !== base[k]).sort(),
+      ['flowMode', 'noiseLayers', 'par', 'pom', 'warp'],
+    );
+  });
+
+  it('only extra-low changes the render scale', () => {
+    for (const id of MODE_IDS) {
+      assert.equal(modeSettings(id).renderScale, id === 'extra-low' ? 0.5 : 1, id);
+    }
+  });
+
   it('returns a fresh object each call', () => {
     const a = modeSettings('baseline');
     a.uniforms.shore = -1;
