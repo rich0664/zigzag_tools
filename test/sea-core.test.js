@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MODE_IDS, modeSettings, pickMode, parseState, renderSize,
-  cameraUniforms, fpsGate, assetUrl,
+  cameraUniforms, fpsGate, assetUrl, shaderCapable,
 } from '../src/sea-core.js';
 import seaConsts from '../src/sea-consts.json' with { type: 'json' };
 
@@ -104,8 +104,44 @@ describe('modeSettings', () => {
   });
 });
 
+describe('shaderCapable', () => {
+  it('needs a WebGL2 context', () => {
+    assert.equal(shaderCapable(false, 16384), false);
+    assert.equal(shaderCapable(null, 16384), false);
+    assert.equal(shaderCapable(true, 16384), true);
+  });
+
+  it('needs MAX_TEXTURE_SIZE to hold the 7749 px map', () => {
+    assert.equal(shaderCapable(true, 0), false);
+    assert.equal(shaderCapable(true, undefined), false);
+    assert.equal(shaderCapable(true, 4096), false);
+    assert.equal(shaderCapable(true, 8191), false);
+    assert.equal(shaderCapable(true, 8192), true);
+    assert.equal(shaderCapable(true, 16384), true);
+  });
+});
+
 describe('pickMode', () => {
   const good = { webgl2: true, maxTextureSize: 16384, coarsePointer: false, narrow: false };
+
+  it('defaults across every env combination', () => {
+    const envs = [];
+    for (const webgl2 of [true, false]) {
+      for (const maxTextureSize of [8191, 8192]) {
+        for (const coarsePointer of [false, true]) {
+          for (const narrow of [false, true]) {
+            envs.push({ webgl2, maxTextureSize, coarsePointer, narrow });
+          }
+        }
+      }
+    }
+    assert.equal(envs.length, 16);
+    for (const env of envs) {
+      const expected = env.webgl2 && env.maxTextureSize >= 8192 &&
+        !env.coarsePointer && !env.narrow ? 'baseline' : 'static';
+      assert.equal(pickMode('', env), expected, JSON.stringify(env));
+    }
+  });
 
   it('lets a saved id win', () => {
     assert.equal(pickMode('low', { ...good, webgl2: false }), 'low');
@@ -147,6 +183,18 @@ describe('parseState', () => {
     assert.equal(s.mode, '');
     assert.equal(s.opacity, 1);
     assert.equal(s.brightness, 1);
+  });
+
+  it('treats case, whitespace and out-of-range strings as corrupt', () => {
+    // MODE_IDS are exact ids: a near-miss must not select a mode
+    assert.equal(parseState({ mode: 'BASELINE' }).mode, '');
+    assert.equal(parseState({ mode: ' baseline' }).mode, '');
+    assert.equal(parseState({ mode: 42 }).mode, '');
+    // a non-number falls back; Infinity is not finite
+    assert.equal(parseState({ opacity: 'Infinity' }).opacity, 1);
+    assert.equal(parseState({ brightness: '1e999' }).brightness, 1);
+    assert.equal(parseState({ fps30: 'yes' }).fps30, false);
+    assert.equal(parseState({ on: 'maybe' }).on, true);   // only 0/false turn it off
   });
 
   it('keeps valid values and clamps them', () => {

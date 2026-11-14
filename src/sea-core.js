@@ -6,7 +6,16 @@ import seaConsts from './sea-consts.json' with { type: 'json' };
 
 const MODE_IDS = ['baseline', 'medium', 'low', 'extra-low', 'static'];
 
+// The colour map is 7749 px wide, so a device below this cannot upload the
+// shader's base texture at all. Shared by the startup probe (sea.js) and
+// pickMode so the hard limit is stated once.
+const MIN_TEXTURE_SIZE = 8192;
+
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function shaderCapable(webgl2, maxTextureSize) {
+  return !!webgl2 && Number(maxTextureSize) >= MIN_TEXTURE_SIZE;
+}
 
 // Saved values are strings or null; missing and unparseable ones use the
 // documented default. (Number(null) is 0, so check for null first.)
@@ -43,9 +52,10 @@ function modeSettings(id) {
 // viewport) stay on the free 2D overlay
 function pickMode(saved, env) {
   if (MODE_IDS.includes(saved)) return saved;
-  return !env.webgl2 || env.maxTextureSize < 8192 || env.coarsePointer || env.narrow
-    ? 'static'
-    : 'baseline';
+  return shaderCapable(env.webgl2, env.maxTextureSize) &&
+    !env.coarsePointer && !env.narrow
+    ? 'baseline'
+    : 'static';
 }
 
 function parseState(raw) {
@@ -98,5 +108,5 @@ function assetUrl(name, base = seaConsts.assetBase) {
 
 export {
   MODE_IDS, modeSettings, pickMode, parseState, renderSize,
-  cameraUniforms, fpsGate, assetUrl,
+  cameraUniforms, fpsGate, assetUrl, shaderCapable,
 };

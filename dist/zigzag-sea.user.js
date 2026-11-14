@@ -17,7 +17,16 @@ const seaConsts = {"version":"0.3.0","assetBase":"https://raw.githubusercontent.
 
 const MODE_IDS = ['baseline', 'medium', 'low', 'extra-low', 'static'];
 
+// The colour map is 7749 px wide, so a device below this cannot upload the
+// shader's base texture at all. Shared by the startup probe (sea.js) and
+// pickMode so the hard limit is stated once.
+const MIN_TEXTURE_SIZE = 8192;
+
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+function shaderCapable(webgl2, maxTextureSize) {
+  return !!webgl2 && Number(maxTextureSize) >= MIN_TEXTURE_SIZE;
+}
 
 // Saved values are strings or null; missing and unparseable ones use the
 // documented default. (Number(null) is 0, so check for null first.)
@@ -54,9 +63,10 @@ function modeSettings(id) {
 // viewport) stay on the free 2D overlay
 function pickMode(saved, env) {
   if (MODE_IDS.includes(saved)) return saved;
-  return !env.webgl2 || env.maxTextureSize < 8192 || env.coarsePointer || env.narrow
-    ? 'static'
-    : 'baseline';
+  return shaderCapable(env.webgl2, env.maxTextureSize) &&
+    !env.coarsePointer && !env.narrow
+    ? 'baseline'
+    : 'static';
 }
 
 function parseState(raw) {
@@ -536,7 +546,16 @@ function mountSeaUi(opts) {
     label.textContent = 'sea';
     applyFont(label);
 
-    button.append(icon, label);
+    // 1 px underline while a lazy texture load is in flight; the menu's status
+    // line carries the words.
+    const loadingMark = seaUiEl('span', [
+      'position:absolute', 'left:4px', 'right:4px', 'bottom:2px', 'height:1px',
+      'background:currentColor', 'opacity:.8', 'pointer-events:none',
+      'display:none',
+    ].join(';'));
+    loadingMark.id = 'zz-sea-loading';
+
+    button.append(icon, label, loadingMark);
 
     // ---- menu --------------------------------------------------------------
 
@@ -587,10 +606,10 @@ function mountSeaUi(opts) {
       radios.push(input);
       quality.append(row(input, labels[id] || id));
     }
-    // Task 8 sets __zzSea.canUseShader. Undefined means "not probed yet", so
-    // the animated entries stay selectable and a failed build falls back.
+    // canUseShader === false is the menu's honest report of a failed probe:
+    // the animated entries are disabled and the note explains why.
     const note = seaUiEl('div', 'font-size:11px;line-height:1.35;opacity:.6;margin:2px 0 0');
-    note.textContent = 'WebGL2 is unavailable, animated modes are off.';
+    note.textContent = 'Animated modes need WebGL2 and an 8192 px texture limit.';
     note.hidden = true;
     quality.append(note);
 
@@ -627,7 +646,15 @@ function mountSeaUi(opts) {
     status.id = 'zz-sea-status';
     status.style.cssText = 'font-size:11px;line-height:1.35;opacity:.75;margin-top:2px';
 
-    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, status);
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.id = 'zz-sea-retry';
+    retryBtn.textContent = 'retry';
+    retryBtn.style.cssText = 'display:none;margin-top:5px;padding:2px 8px;' +
+      'background:transparent;border:1px solid #ffffff44;border-radius:3px;' +
+      'color:inherit;font:inherit;font-size:11px;cursor:pointer';
+
+    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, status, retryBtn);
 
     wrap.append(button, menu);
     document.body.appendChild(wrap);
@@ -650,6 +677,16 @@ function mountSeaUi(opts) {
       brightness.input.value = String(br);
       brightness.out.textContent = `${br}%`;
       fpsBox.checked = !!s.fps30;
+
+      // The status line carries lazy-load progress and the fallback reason;
+      // retry is only offered where a retry can plausibly help.
+      const loading = !!s.loading;
+      loadingMark.style.display = loading ? 'block' : 'none';
+      const err = s.error ? String(s.error) : '';
+      status.textContent = loading ? 'loading sea…' : err;
+      status.title = err;
+      retryBtn.style.display =
+        err && !loading && s.canUseShader !== false ? 'inline-block' : 'none';
     }
 
     function emit(patch) {
@@ -727,6 +764,7 @@ function mountSeaUi(opts) {
       emit({ brightness: Number(brightness.input.value) / 100 });
     });
     fpsBox.addEventListener('change', () => emit({ fps30: fpsBox.checked }));
+    retryBtn.addEventListener('click', () => emit({ retry: true }));
 
     const onResize = () => reposition();
 
@@ -799,9 +837,10 @@ function mountSeaUi(opts) {
  *               per map tile, smoothing off).
  *   animated  - a WebGL2 full-screen triangle running the ported sea shader
  *               (src/sea-glsl.js) over the full-map distance/aux/flow/speed
- *               bakes. The startup mode is the saved one; the capability probe
- *               and its error/retry UI arrive with Task 8, so an animated build
- *               that throws simply falls back to static.
+ *               bakes. Textures load on the first animated request, never for
+ *               static. A throwaway context probes WebGL2 and MAX_TEXTURE_SIZE
+ *               first; failures (probe, texture load/upload, context loss) fall
+ *               back to static with a reason in the menu and a retry.
  */
 (() => {
   'use strict';
@@ -816,9 +855,28 @@ function mountSeaUi(opts) {
   const url = name => assetUrl(name, assetBase);
   const errText = e => String((e && e.message) || e);
 
+  // ---- capability probe ----------------------------------------------------
+  // A throwaway context reads the texture limit, then is released so the page
+  // keeps its context budget. Nothing is fetched for the shader before this.
+  function probeShader() {
+    try {
+      const canvas = document.createElement('canvas');
+      const gl = canvas.getContext('webgl2');
+      if (!gl) return { webgl2: false, maxTextureSize: 0 };
+      const maxTextureSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 0;
+      const lose = gl.getExtension('WEBGL_lose_context');
+      if (lose) { try { lose.loseContext(); } catch {} }
+      return { webgl2: true, maxTextureSize };
+    } catch {
+      return { webgl2: false, maxTextureSize: 0 };
+    }
+  }
+
+  const probe = probeShader();
+  const canUseShader = shaderCapable(probe.webgl2, probe.maxTextureSize);
+
   // Saved values live under the zz-sea-* keys; the pure core parses and clamps
-  // them. The capability probe arrives with Task 8: assume a shader-capable
-  // device for the default choice, and let setMode's failure path fall back.
+  // them.
   const saved = parseState({
     mode: localStorage.getItem('zz-sea-mode'),
     on: localStorage.getItem('zz-sea-on'),
@@ -828,20 +886,28 @@ function mountSeaUi(opts) {
   });
 
   const env = {
-    webgl2: true, maxTextureSize: 8192,
+    webgl2: probe.webgl2, maxTextureSize: probe.maxTextureSize,
     coarsePointer: !!(window.matchMedia && matchMedia('(pointer: coarse)').matches),
     narrow: window.innerWidth < 700,
   };
-  const startupMode = pickMode(saved.mode, env);   // unknown saved id -> default
+  // A saved mode still wins over the weak-device default, but the probe's hard
+  // limits beat everything: without a usable shader the overlay starts static
+  // and the animated entries are disabled in the menu.
+  const startupMode = canUseShader ? pickMode(saved.mode, env) : 'static';
 
   const state = {
     on: saved.on,
     mode: 'static',                // the live mode; the saved one is applied when ready
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
-    glReady: false, error: null,
+    glReady: false, error: null, loading: false,
+    canUseShader, maxTextureSize: probe.maxTextureSize,
   };
   window.__zzSea = state;
+
+  // The requested mode (menu choice / saved preference), kept across a
+  // fallback so context restore and retry know what to rebuild.
+  let wantedMode = startupMode;
 
   // The HUD is mounted lazily (the SPA header may not exist yet); the runtime
   // pushes state changes it makes outside the menu back into it.
@@ -857,6 +923,12 @@ function mountSeaUi(opts) {
   let deckObserver = null;
   let deckTimer = 0;
   let deckWatchStart = 0;
+
+  // The first animated build takes seconds. Until its first GL frame the 2D
+  // canvas stays visible (and keeps repainting with the camera) so the map is
+  // never left blank.
+  let holdStatic = false;
+  const staticVisible = () => state.mode === 'static' || holdStatic;
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -899,8 +971,8 @@ function mountSeaUi(opts) {
     return ov;
   }
 
-  function drawStatic() {
-    if (state.mode !== 'static' || !state.on) return;
+  function drawStatic(force) {
+    if (!state.on || !staticVisible()) return;
     const deck = deckCanvas();
     const img = state.img;
     if (!deck || !img) return;
@@ -914,7 +986,7 @@ function mountSeaUi(opts) {
     const H = deck.clientHeight || deck.height;
 
     const sig = [vs.zoom, vs.target[0], vs.target[1], pad.left, pad.right, W, H].join('|');
-    if (sig === state.sig) return;
+    if (!force && sig === state.sig) return;
     state.sig = sig;
 
     const ov = overlay(deck);
@@ -953,13 +1025,13 @@ function mountSeaUi(opts) {
 
   function staticTick() {
     state.raf = 0;
-    if (state.mode !== 'static' || !state.on || document.hidden) return;
+    if (!state.on || document.hidden || !staticVisible()) return;
     try { drawStatic(); } catch (e) { state.error = errText(e); }
     state.raf = requestAnimationFrame(staticTick);
   }
 
   function startStatic() {
-    if (state.raf || state.mode !== 'static' || !state.on || document.hidden) return;
+    if (state.raf || !state.on || document.hidden || !staticVisible()) return;
     state.raf = requestAnimationFrame(staticTick);
   }
 
@@ -971,6 +1043,35 @@ function mountSeaUi(opts) {
   function removeStaticCanvas() {
     const ov = document.getElementById(OV_ID);
     if (ov) ov.remove();
+  }
+
+  // The colour map is the only texture static needs. It also feeds the GL
+  // colour texture, so it is decoded once; releasing it while animated keeps a
+  // 40 MPx bitmap out of memory next to the GPU copy.
+  let colourPromise = null;
+
+  function loadColour() {
+    if (state.img) return Promise.resolve(state.img);
+    if (colourPromise) return colourPromise;
+    colourPromise = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => {
+        colourPromise = null;
+        state.img = img;
+        state.sig = '';
+        if (staticVisible()) startStatic();
+        resolve(img);
+      };
+      img.onerror = () => {
+        colourPromise = null;
+        state.error = 'texture: failed to load ' + url('zigzag-sea.webp');
+        refreshUi();
+        reject(new Error(state.error));
+      };
+      img.src = url('zigzag-sea.webp');
+    });
+    return colourPromise;
   }
 
   // ---- GL path -------------------------------------------------------------
@@ -992,19 +1093,26 @@ function mountSeaUi(opts) {
 
   function link(gl) {
     const prog = gl.createProgram();
-    const vs = compile(gl, gl.VERTEX_SHADER, VERT);
-    const fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
-    gl.attachShader(prog, vs);
-    gl.attachShader(prog, fs);
-    gl.linkProgram(prog);
-    gl.deleteShader(vs);
-    gl.deleteShader(fs);
-    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      const log = gl.getProgramInfoLog(prog);
+    let vs = null;
+    let fs = null;
+    try {
+      vs = compile(gl, gl.VERTEX_SHADER, VERT);
+      fs = compile(gl, gl.FRAGMENT_SHADER, FRAG);
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        throw new Error('shader link: ' + gl.getProgramInfoLog(prog));
+      }
+      gl.deleteShader(vs);
+      gl.deleteShader(fs);
+      return prog;
+    } catch (e) {
+      if (vs) gl.deleteShader(vs);
+      if (fs) gl.deleteShader(fs);
       gl.deleteProgram(prog);
-      throw new Error('shader link: ' + log);
+      throw e;
     }
-    return prog;
   }
 
   const UNIFORM_NAMES = [
@@ -1049,7 +1157,28 @@ function mountSeaUi(opts) {
     }
   }
 
-  function loadTexture(gl, src, nearest) {
+  // Fetch + decode off the main thread where the browser supports it. The four
+  // shader textures are 40 MPx; Image decoding on the main thread would stall
+  // the page during the first animated switch.
+  function decodeTexture(src) {
+    if (typeof createImageBitmap === 'function') {
+      return fetch(src, { mode: 'cors' })
+        .then(r => {
+          if (!r.ok) throw new Error(`texture: ${src} HTTP ${r.status}`);
+          return r.blob();
+        })
+        .then(b => createImageBitmap(b));
+    }
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error('texture: failed to load ' + src));
+      img.src = src;
+    });
+  }
+
+  function uploadTexture(gl, source, nearest) {
     const tex = gl.createTexture();
     const f = nearest ? gl.NEAREST : gl.LINEAR;
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -1057,18 +1186,12 @@ function mountSeaUi(opts) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
-    return new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        gl.bindTexture(gl.TEXTURE_2D, tex);
-        gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
-        resolve({ tex, w: img.width, h: img.height });
-      };
-      img.onerror = () => { gl.deleteTexture(tex); reject(new Error('texture failed: ' + src)); };
-      img.src = src;
-    });
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    const w = source.width;
+    const h = source.height;
+    if (typeof source.close === 'function') source.close();
+    return { tex, w, h };
   }
 
   // 5-point polyline sampled linearly at 128 texels, as np.interp would
@@ -1092,9 +1215,21 @@ function mountSeaUi(opts) {
     return tex;
   }
 
+  function drainErrors(gl) {
+    for (let i = 0; i < 16 && gl.getError() !== gl.NO_ERROR; i++) { /* clear sticky errors */ }
+  }
+
   function buildGL() {
     const deck = deckCanvas();
     if (!deck || !deck.parentNode) throw new Error('no deck canvas');
+    if (!canUseShader) {
+      throw new Error('shader unavailable: MAX_TEXTURE_SIZE ' + probe.maxTextureSize);
+    }
+
+    // A lost context's canvas is kept for webglcontextrestored; a rebuild owns
+    // the slot again and the old one goes.
+    const stale = document.getElementById(GL_ID);
+    if (stale) stale.remove();
 
     const canvas = document.createElement('canvas');
     canvas.id = GL_ID;
@@ -1128,9 +1263,18 @@ function mountSeaUi(opts) {
         slice: curveTexture(gl, seaConsts.curves.sc),
         warp: curveTexture(gl, seaConsts.curves.wc),
       },
-      size: {}, raf: 0, ready: false, css: '',
+      size: {}, raf: 0, ready: false, css: '', lost: false, first: false,
+      onLost: null, onRestored: null,
     };
     glc = c;
+    c.onLost = e => onContextLost(c, e);
+    c.onRestored = () => onContextRestored(c);
+    canvas.addEventListener('webglcontextlost', c.onLost);
+    canvas.addEventListener('webglcontextrestored', c.onRestored);
+
+    drainErrors(gl);
+    state.loading = true;
+    refreshUi();
 
     // colour NEAREST (1 texel per tile); aux/flow/speed LINEAR; dist NEAREST
     // (always sampled on a texel centre because snap is on)
@@ -1142,29 +1286,111 @@ function mountSeaUi(opts) {
       ['speed', 'zigzag-sea-speed.webp', false],
     ];
     Promise.all(specs.map(([key, name, nearest]) =>
-      loadTexture(gl, url(name), nearest)
-        .then(r => { c.tex[key] = r.tex; c.size[key] = [r.w, r.h]; }),
+      // The colour decode is shared with the 2D path; a second fetch of the
+      // same 40 MPx WebP is both slow and memory.
+      (key === 'colour' ? loadColour() : decodeTexture(url(name)))
+        .then(source => {
+          if (glc !== c || c.lost) {
+            if (typeof source.close === 'function') source.close();
+            return;
+          }
+          const up = uploadTexture(gl, source, nearest);
+          c.tex[key] = up.tex;
+          c.size[key] = [up.w, up.h];
+        }),
     )).then(() => {
-      if (glc !== c) return;
+      if (glc !== c || c.lost) return;
+      // No silent ready: an upload error or an oversized texture means the
+      // device cannot hold this mode, even though WebGL2 exists.
+      const glErr = gl.getError();
+      if (glErr !== gl.NO_ERROR) {
+        throw new Error('texture: GL error 0x' + glErr.toString(16));
+      }
+      const max = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || probe.maxTextureSize;
+      for (const key of ['colour', 'dist', 'aux', 'flow', 'speed']) {
+        const [w, h] = c.size[key] || [0, 0];
+        if (!w || !h || w > max || h > max) {
+          throw new Error(`texture: ${key} ${w}x${h} > MAX_TEXTURE_SIZE ${max}`);
+        }
+      }
       c.ready = true;
       state.glReady = true;
+      state.loading = false;
       state.error = null;
       startGL();
+      refreshUi();
     }).catch(e => {
-      if (glc === c) fallbackToStatic(e);
+      state.loading = false;
+      if (glc === c && !c.lost) fallbackToStatic(e);
+      else refreshUi();
     });
+  }
+
+  // A lost context keeps its canvas and listeners so the browser can restore
+  // it. The live mode falls back immediately; the requested animated mode is
+  // remembered for the restored event.
+  function onContextLost(c, e) {
+    if (e && e.preventDefault) e.preventDefault();
+    if (glc !== c || c.lost) return;
+    c.lost = true;
+    c.ready = false;
+    stopGL();
+    state.glReady = false;
+    state.loading = false;
+    state.mode = 'static';
+    state.sig = '';
+    holdStatic = false;
+    state.error = 'context lost' +
+      (e && e.statusMessage ? ': ' + e.statusMessage : '');
+    if (c.canvas) c.canvas.style.display = 'none';
+    if (state.img) {
+      try { drawStatic(); } catch (err) { state.error = errText(err); }
+      startStatic();
+    } else {
+      loadColour().catch(() => {});
+    }
+    refreshUi();
+  }
+
+  function onContextRestored(c) {
+    if (glc !== c) return;
+    const canvas = c.canvas;
+    glc = null;
+    c.ready = false;
+    state.glReady = false;
+    if (canvas) {
+      canvas.removeEventListener('webglcontextlost', c.onLost);
+      canvas.removeEventListener('webglcontextrestored', c.onRestored);
+      canvas.remove();
+    }
+    if (!canUseShader) { refreshUi(); return; }
+    if (!wantedMode || wantedMode === 'static') {
+      state.error = null;
+      refreshUi();
+      return;
+    }
+    try { setMode(wantedMode); } catch (e) { fallbackToStatic(e); }
   }
 
   function releaseGL() {
     if (!glc) return;
-    if (glc.raf) cancelAnimationFrame(glc.raf);
-    const { gl, canvas, prog } = glc;
+    const c = glc;
     glc = null;
+    if (c.raf) cancelAnimationFrame(c.raf);
     state.glReady = false;
-    try { gl.deleteProgram(prog); } catch {}
-    const lose = gl.getExtension('WEBGL_lose_context');
-    if (lose) { try { lose.loseContext(); } catch {} }
-    canvas.remove();
+    if (c.canvas) {
+      if (c.onLost) c.canvas.removeEventListener('webglcontextlost', c.onLost);
+      if (c.onRestored) c.canvas.removeEventListener('webglcontextrestored', c.onRestored);
+    }
+    try { c.gl.deleteProgram(c.prog); } catch {}
+    for (const key of Object.keys(c.tex || {})) {
+      try { c.gl.deleteTexture(c.tex[key]); } catch {}
+    }
+    if (!c.lost) {
+      const lose = c.gl.getExtension('WEBGL_lose_context');
+      if (lose) { try { lose.loseContext(); } catch {} }
+    }
+    if (c.canvas) c.canvas.remove();
   }
 
   function renderFrame(c, w, h, cam, t, settings) {
@@ -1224,7 +1450,7 @@ function mountSeaUi(opts) {
   }
 
   function drawGL(t) {
-    if (!glc || !glc.ready) return;
+    if (!glc || !glc.ready || glc.lost) return;
     const deck = deckCanvas();
     if (!deck) return;
     const vs = viewState(deck);
@@ -1254,23 +1480,39 @@ function mountSeaUi(opts) {
       centerX: cam.centerX, centerY: cam.centerY,
     }, t, settings);
     state.draws++;
+
+    // The first real frame means the 2D canvas can go: the opaque-enough water
+    // is already in the drawing buffer, so removing it cannot show a blank.
+    // The colour decode it was holding is freed too; the GPU copy is enough
+    // while animated.
+    if (!glc.first && state.on) {
+      glc.first = true;
+      holdStatic = false;
+      removeStaticCanvas();
+      state.img = null;
+    }
   }
 
   function glTick(now) {
     if (!glc) return;
     glc.raf = 0;
-    if (state.mode === 'static' || !state.on || document.hidden) return;
-    // the loop still runs every rAF; the gate decides which frames draw
-    const gate = fpsGate(now, nextAt, state.fps30);
-    nextAt = gate.nextAt;
-    if (gate.draw) {
-      try { drawGL(now / 1000); } catch (e) { fallbackToStatic(e); return; }
+    if (glc.lost || state.mode === 'static' || !state.on || document.hidden) return;
+    try {
+      // the loop still runs every rAF; the gate decides which frames draw
+      const gate = fpsGate(now, nextAt, state.fps30);
+      nextAt = gate.nextAt;
+      if (gate.draw) drawGL(now / 1000);
+    } catch (e) {
+      // A GL exception (including a lost context surfacing as one) is a
+      // fallback, never a page error.
+      fallbackToStatic(e);
+      return;
     }
-    glc.raf = requestAnimationFrame(glTick);
+    if (glc) glc.raf = requestAnimationFrame(glTick);
   }
 
   function startGL() {
-    if (!glc || glc.raf || !glc.ready) return;
+    if (!glc || glc.raf || !glc.ready || glc.lost) return;
     if (state.mode === 'static' || !state.on || document.hidden) return;
     glc.raf = requestAnimationFrame(glTick);
   }
@@ -1280,39 +1522,140 @@ function mountSeaUi(opts) {
     if (glc) glc.raf = 0;
   }
 
+  // The animated renderer is gone; paint the 2D path again. While an
+  // animated build was loading, its canvases and the decoded colour image are
+  // still around, so this repaints without a gap. Otherwise the colour decode
+  // is requested and the dead canvas is dropped once it can be replaced.
   function fallbackToStatic(reason) {
     state.error = errText(reason);
+    state.loading = false;
     pendingMode = null;
-    releaseGL();
     state.mode = 'static';
     state.sig = '';
-    try { drawStatic(); } catch (e) { state.error = errText(e); }
-    startStatic();
-    refreshUi();
+    holdStatic = false;
+    if (glc && glc.lost) {
+      // keep the lost canvas alive for webglcontextrestored
+      stopGL();
+      if (glc.canvas) glc.canvas.style.display = 'none';
+      if (state.img) {
+        try { drawStatic(); } catch (e) { state.error = errText(e); }
+        startStatic();
+      } else {
+        loadColour().catch(() => {});
+      }
+      refreshUi();
+      return;
+    }
+    if (state.img) {
+      releaseGL();
+      try { drawStatic(); } catch (e) { state.error = errText(e); }
+      startStatic();
+      refreshUi();
+      return;
+    }
+    // The colour image was released while animated: keep the last GL frame up
+    // until the cached WebP decodes, then swap the 2D canvas in. A token drops
+    // the swap if a newer mode change has taken over.
+    const token = ++staticToken;
+    stopGL();
+    loadColour().then(() => {
+      if (token !== staticToken || state.mode !== 'static') return;
+      releaseGL();
+      state.sig = '';
+      try { drawStatic(); } catch (e) { state.error = errText(e); }
+      startStatic();
+      refreshUi();
+    }).catch(e => {
+      if (token !== staticToken) return;
+      releaseGL();
+      state.error = errText(e);
+      refreshUi();
+    });
+  }
+
+  // Switching to static from a running animated mode: the decoded colour image
+  // is gone, so the GL canvas stays up until the cached image can replace it.
+  let staticToken = 0;
+
+  function enterStatic() {
+    const token = ++staticToken;
+    stopStatic();
+    state.sig = '';
+    holdStatic = false;
+    if (state.img) {
+      releaseGL();
+      try { drawStatic(); } catch (e) { state.error = errText(e); }
+      startStatic();
+      return;
+    }
+    stopGL();
+    loadColour().then(() => {
+      if (token !== staticToken || state.mode !== 'static') return;
+      releaseGL();
+      state.sig = '';
+      try { drawStatic(); } catch (e) { state.error = errText(e); }
+      startStatic();
+      refreshUi();
+    }).catch(e => {
+      if (token !== staticToken) return;
+      releaseGL();
+      state.error = errText(e);
+      refreshUi();
+    });
   }
 
   // ---- mode switch ---------------------------------------------------------
 
   function setMode(id) {
     modeSettings(id);                       // validates, throws on unknown ids
-    if (state.mode === id && (id === 'static' || glc)) return id;
+    if (id !== 'static' && !canUseShader) {
+      wantedMode = id;
+      state.error = 'shader unavailable: MAX_TEXTURE_SIZE ' + probe.maxTextureSize;
+      state.loading = false;
+      state.mode = 'static';
+      state.sig = '';
+      holdStatic = false;
+      if (state.img) {
+        try { drawStatic(); } catch (e) { state.error = errText(e); }
+        startStatic();
+      }
+      refreshUi();
+      return state.mode;
+    }
+
+    wantedMode = id;
+    if (state.mode === id && id !== 'static' && glc && glc.ready && !glc.lost) return id;
 
     state.mode = id;
     state.sig = '';
     if (id === 'static') {
-      releaseGL();
-      try { drawStatic(); } catch (e) { state.error = errText(e); }
-      startStatic();
+      state.error = null;
+      state.loading = false;
+      enterStatic();
     } else {
+      state.error = null;
       stopStatic();
-      removeStaticCanvas();
-      if (glc) {
-        // tier switch: same program and textures, new backing store; the loop
-        // re-applies uniforms from modeSettings on the next frame
-        sizeGL(modeSettings(id).renderScale);
+      // Tier switches reuse the program and textures; the first build keeps
+      // the 2D canvas visible until a GL frame exists.
+      if (glc && glc.ready && !glc.lost) {
+        try {
+          sizeGL(modeSettings(id).renderScale);
+          nextAt = 0;                       // paint on this tick, not the next
+          drawGL(performance.now() / 1000);
+        } catch (e) {
+          fallbackToStatic(e);
+          return state.mode;
+        }
+        startGL();
+      } else if (glc && !glc.lost) {
+        // a build is already in flight; it will render with the current mode
+        startStatic();
         startGL();
       } else {
+        holdStatic = true;
         try { buildGL(); } catch (e) { fallbackToStatic(e); }
+        // keep the 2D overlay following the camera while the textures load
+        startStatic();
       }
     }
     refreshUi();
@@ -1358,10 +1701,12 @@ function mountSeaUi(opts) {
   // settles on if the app is not ready yet.
   function requestMode(id) {
     modeSettings(id);                       // validates, throws on unknown ids
+    wantedMode = id;
     if (id !== 'static' && !deckCanvas()) {
       pendingMode = id;
       watchForDeck();
       applyPendingMode();                   // in case it arrived just now
+      refreshUi();
       return state.mode;
     }
     pendingMode = null;
@@ -1369,11 +1714,26 @@ function mountSeaUi(opts) {
     try { return setMode(id); } catch (e) { fallbackToStatic(e); return state.mode; }
   }
 
+  // Retry the animated mode that failed. The saved/requested id was left
+  // intact by fallbackToStatic, so a texture or context failure can be tried
+  // again after the network or GPU recovers.
+  function retry() {
+    if (!canUseShader) {
+      state.error = 'shader unavailable: MAX_TEXTURE_SIZE ' + probe.maxTextureSize;
+      refreshUi();
+      return state.mode;
+    }
+    const target = wantedMode && wantedMode !== 'static'
+      ? wantedMode
+      : pickMode('', env);
+    return requestMode(target);
+  }
+
   // One frame at an exact size and camera, read back synchronously. Used by the
   // parity check: it is the camera, not the live viewport, that decides.
   function debugRender(opts) {
     opts = opts || {};
-    if (!glc || !glc.ready) throw new Error('gl path not ready');
+    if (!glc || !glc.ready || glc.lost) throw new Error('gl path not ready');
     const w = Math.max(1, Math.round(Number(opts.width)));
     const h = Math.max(1, Math.round(Number(opts.height)));
     const zoom = Number(opts.zoom);
@@ -1426,9 +1786,71 @@ function mountSeaUi(opts) {
         canvas.width = prevW;
         canvas.height = prevH;
       }
-      if (state.mode !== 'static' && glc && glc.ready) {
+      if (state.mode !== 'static' && glc && glc.ready && !glc.lost) {
         try { drawGL(performance.now() / 1000); } catch (e) { state.error = errText(e); }
       }
+    }
+  }
+
+  // gl.finish() is a no-op on some drivers (headless SwiftShader included), so
+  // a one-pixel readback is the portable way to wait for queued frames.
+  function syncGL(gl) {
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(4));
+  }
+
+  // 60 frames at the live camera and backing size, then hand the frame back to
+  // the loop. Static has no animation clock, so it measures 60 forced 2D
+  // blits of the current view instead.
+  function bench() {
+    const mode = state.mode;
+    try {
+      if (mode === 'static') {
+        if (!state.img) throw new Error('static not ready');
+        const t0 = performance.now();
+        for (let i = 0; i < 60; i++) drawStatic(true);
+        const ms = performance.now() - t0;
+        startStatic();
+        return { mode, ms, fps: ms > 0 ? 60000 / ms : 0 };
+      }
+
+      if (!glc || !glc.ready || glc.lost) throw new Error('gl path not ready');
+      const deck = deckCanvas();
+      const vs = deck && viewState(deck);
+      if (!vs) throw new Error('no camera');
+      const settings = modeSettings(mode);
+      const sized = sizeGL(settings.renderScale);
+      if (!sized) throw new Error('no viewport');
+
+      const cam = cameraUniforms(vs, sized.cssW, sized.cssH, sized.w, sized.h);
+      const frame = {
+        tx: vs.target[0], ty: vs.target[1],
+        zoom: cam.zoomPx, zoomCss: cam.zoomPx / sized.scale,
+        centerX: cam.centerX, centerY: cam.centerY,
+      };
+      const start = performance.now();
+      let ms;
+      try {
+        // Warm up, then wait for the GPU so the clock measures work instead of
+        // command submission.
+        renderFrame(glc, sized.w, sized.h, frame, start / 1000, settings);
+        syncGL(glc.gl);
+        const t0 = performance.now();
+        for (let i = 0; i < 60; i++) {
+          renderFrame(glc, sized.w, sized.h, frame, start / 1000 + i / 60, settings);
+        }
+        syncGL(glc.gl);
+        ms = performance.now() - t0;
+      } finally {
+        // Restore the live frame and loop whatever happened during the run.
+        nextAt = 0;
+        try { drawGL(performance.now() / 1000); } catch (e) { fallbackToStatic(e); }
+        startGL();
+      }
+      return { mode: state.mode, ms, fps: ms > 0 ? 60000 / ms : 0 };
+    } catch (e) {
+      state.error = errText(e);
+      refreshUi();
+      return { mode: state.mode, ms: 0, fps: 0, error: state.error };
     }
   }
 
@@ -1440,6 +1862,7 @@ function mountSeaUi(opts) {
     state.brightness = clamp(isFinite(v) ? v : 1, 0.5, 1.5);
     const ov = document.getElementById(OV_ID);
     if (ov) ov.style.filter = `brightness(${state.brightness})`;
+    refreshUi();
     return state.brightness;
   }
 
@@ -1454,12 +1877,14 @@ function mountSeaUi(opts) {
       glc.css = '';
       glc.canvas.style.opacity = String(state.opacity);
     }
+    refreshUi();
     return state.opacity;
   }
 
   function setFps30(on) {
     state.fps30 = !!on;
     nextAt = 0;                    // the next rAF draws immediately
+    refreshUi();
     return state.fps30;
   }
 
@@ -1475,17 +1900,26 @@ function mountSeaUi(opts) {
     if (!state.on) {
       stopStatic();
       stopGL();
+      refreshUi();
       return state.on;
     }
     if (pendingMode && applyPendingMode()) return state.on;
-    if (state.mode === 'static') startStatic();
-    else if (glc) startGL();
-    else setMode(state.mode);
+    if (state.mode === 'static') {
+      if (!state.img) loadColour().catch(() => {});
+      startStatic();
+    } else if (glc && glc.ready && !glc.lost) {
+      startGL();
+    } else {
+      setMode(state.mode);
+    }
+    refreshUi();
     return state.on;
   }
 
   state.setMode = setMode;
   state.debugRender = debugRender;
+  state.bench = bench;
+  state.retry = retry;
   state.setFps30 = setFps30;
   state.setBrightness = setBrightness;
   state.setOpacity = setOpacity;
@@ -1498,7 +1932,8 @@ function mountSeaUi(opts) {
     return {
       on: state.on, mode: state.mode, opacity: state.opacity,
       brightness: state.brightness, fps30: state.fps30,
-      canUseShader: state.canUseShader,
+      canUseShader: state.canUseShader, maxTextureSize: state.maxTextureSize,
+      loading: state.loading, error: state.error,
     };
   }
 
@@ -1510,6 +1945,9 @@ function mountSeaUi(opts) {
     if ('mode' in patch) {
       requestMode(patch.mode);       // may wait for the deck instead of demoting
       localStorage.setItem('zz-sea-mode', patch.mode);
+    }
+    if ('retry' in patch) {
+      retry();
     }
     if ('opacity' in patch) {
       localStorage.setItem('zz-sea-opacity', String(setOpacity(patch.opacity)));
@@ -1528,21 +1966,20 @@ function mountSeaUi(opts) {
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); }
-    else if (state.mode === 'static') startStatic();
-    else startGL();
+    else if (state.mode === 'static') {
+      if (!state.img) loadColour().catch(() => {});
+      startStatic();
+    } else {
+      if (holdStatic) startStatic();
+      startGL();
+    }
   });
 
   // ---- startup -------------------------------------------------------------
 
-  const img = new Image();
-  img.crossOrigin = 'anonymous';
-  img.onload = () => {
-    state.img = img;
-    state.sig = '';
-    if (state.mode === 'static') startStatic();
-  };
-  img.onerror = () => { state.error = 'sea texture failed to load'; };
-  img.src = url('zigzag-sea.webp');
+  // Static needs the colour map immediately; the animated build reuses this
+  // decode instead of fetching the same 40 MPx WebP again.
+  loadColour().catch(() => {});
 
   // The saved mode is a preference, not a claim that the app is ready. An
   // animated saved mode waits for #deckgl-overlay (this SPA renders it after

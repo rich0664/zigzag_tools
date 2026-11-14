@@ -117,7 +117,16 @@ function mountSeaUi(opts) {
     label.textContent = 'sea';
     applyFont(label);
 
-    button.append(icon, label);
+    // 1 px underline while a lazy texture load is in flight; the menu's status
+    // line carries the words.
+    const loadingMark = seaUiEl('span', [
+      'position:absolute', 'left:4px', 'right:4px', 'bottom:2px', 'height:1px',
+      'background:currentColor', 'opacity:.8', 'pointer-events:none',
+      'display:none',
+    ].join(';'));
+    loadingMark.id = 'zz-sea-loading';
+
+    button.append(icon, label, loadingMark);
 
     // ---- menu --------------------------------------------------------------
 
@@ -168,10 +177,10 @@ function mountSeaUi(opts) {
       radios.push(input);
       quality.append(row(input, labels[id] || id));
     }
-    // Task 8 sets __zzSea.canUseShader. Undefined means "not probed yet", so
-    // the animated entries stay selectable and a failed build falls back.
+    // canUseShader === false is the menu's honest report of a failed probe:
+    // the animated entries are disabled and the note explains why.
     const note = seaUiEl('div', 'font-size:11px;line-height:1.35;opacity:.6;margin:2px 0 0');
-    note.textContent = 'WebGL2 is unavailable, animated modes are off.';
+    note.textContent = 'Animated modes need WebGL2 and an 8192 px texture limit.';
     note.hidden = true;
     quality.append(note);
 
@@ -208,7 +217,15 @@ function mountSeaUi(opts) {
     status.id = 'zz-sea-status';
     status.style.cssText = 'font-size:11px;line-height:1.35;opacity:.75;margin-top:2px';
 
-    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, status);
+    const retryBtn = document.createElement('button');
+    retryBtn.type = 'button';
+    retryBtn.id = 'zz-sea-retry';
+    retryBtn.textContent = 'retry';
+    retryBtn.style.cssText = 'display:none;margin-top:5px;padding:2px 8px;' +
+      'background:transparent;border:1px solid #ffffff44;border-radius:3px;' +
+      'color:inherit;font:inherit;font-size:11px;cursor:pointer';
+
+    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, status, retryBtn);
 
     wrap.append(button, menu);
     document.body.appendChild(wrap);
@@ -231,6 +248,16 @@ function mountSeaUi(opts) {
       brightness.input.value = String(br);
       brightness.out.textContent = `${br}%`;
       fpsBox.checked = !!s.fps30;
+
+      // The status line carries lazy-load progress and the fallback reason;
+      // retry is only offered where a retry can plausibly help.
+      const loading = !!s.loading;
+      loadingMark.style.display = loading ? 'block' : 'none';
+      const err = s.error ? String(s.error) : '';
+      status.textContent = loading ? 'loading sea…' : err;
+      status.title = err;
+      retryBtn.style.display =
+        err && !loading && s.canUseShader !== false ? 'inline-block' : 'none';
     }
 
     function emit(patch) {
@@ -308,6 +335,7 @@ function mountSeaUi(opts) {
       emit({ brightness: Number(brightness.input.value) / 100 });
     });
     fpsBox.addEventListener('change', () => emit({ fps30: fpsBox.checked }));
+    retryBtn.addEventListener('click', () => emit({ retry: true }));
 
     const onResize = () => reposition();
 
