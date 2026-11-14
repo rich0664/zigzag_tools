@@ -141,7 +141,10 @@ function assetUrl(name) {
     fps30: localStorage.getItem('zz-sea-fps'),
   });
 
-  const state = { on: saved.on, mode: pickMode(saved.mode, {
+  // Until the GL path exists, no saved mode can render: start static so the
+  // intermediate build cannot claim an animated mode it cannot draw. The saved
+  // value stays in `saved.mode` for Task 5/8 to honour.
+  const state = { on: saved.on, mode: pickMode('', {
                     webgl2: false, maxTextureSize: 0,
                     coarsePointer: false, narrow: false,
                   }),
