@@ -883,6 +883,9 @@ function mountSeaUi(opts) {
       deck.parentNode.insertBefore(ov, deck);
     }
     ov.style.cssText = (deck.getAttribute('style') || '') + ';pointer-events:none';
+    // cssText replaced every style above, including the hide applied by
+    // setOn(false); re-apply it so a rebuild while off cannot reveal the sea.
+    ov.style.display = state.on ? '' : 'none';
     ov.style.opacity = String(state.opacity);
     ov.style.filter = `brightness(${state.brightness})`;
     // work in CSS pixels: quality settings and devicePixelRatio change the
@@ -897,7 +900,7 @@ function mountSeaUi(opts) {
   }
 
   function drawStatic() {
-    if (state.mode !== 'static') return;
+    if (state.mode !== 'static' || !state.on) return;
     const deck = deckCanvas();
     const img = state.img;
     if (!deck || !img) return;
@@ -1095,6 +1098,7 @@ function mountSeaUi(opts) {
 
     const canvas = document.createElement('canvas');
     canvas.id = GL_ID;
+    if (!state.on) canvas.style.display = 'none';
     deck.parentNode.insertBefore(canvas, deck);
 
     const gl = canvas.getContext('webgl2', {
@@ -1236,7 +1240,8 @@ function mountSeaUi(opts) {
       deck.parentNode.insertBefore(canvas, deck);
     }
     const css = (deck.getAttribute('style') || '') +
-      ';pointer-events:none;opacity:' + state.opacity;
+      ';pointer-events:none;opacity:' + state.opacity +
+      (state.on ? '' : ';display:none');
     if (glc.css !== css) {
       glc.css = css;
       canvas.style.cssText = css;
