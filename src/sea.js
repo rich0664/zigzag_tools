@@ -362,7 +362,20 @@
     });
   }
 
-  function uploadTexture(gl, source, nearest) {
+  // The WebP bakes decode to RGBA, but only the channels the shader reads need
+  // to reach the GPU. A sized internal format stores exactly those: RGBA8 for
+  // the colour map, R8 for the two scalar fields, RGB8 for the multi-channel
+  // ones. (Plain RGBA was ~377 MB; this is ~237 MB with the colour map.)
+  const TEX_FORMAT = {
+    colour: ['RGBA8', 'RGBA'],
+    dist: ['R8', 'RED'],            // shader reads .r
+    aux: ['RGB8', 'RGB'],           // .r depth, .gb along
+    flow: ['RGB8', 'RGB'],          // .rg direction, .b the coarse-only speed
+    speed: ['R8', 'RED'],           // shader reads .r
+  };
+
+  function uploadTexture(gl, source, nearest, key) {
+    const [internal, format] = TEX_FORMAT[key];
     const tex = gl.createTexture();
     const f = nearest ? gl.NEAREST : gl.LINEAR;
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -370,11 +383,19 @@
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);   // required for R8/RGB8 rows
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl[internal], gl[format], gl.UNSIGNED_BYTE, source);
+    // A browser that rejects this internalformat/source pair must fail loudly:
+    // silently uploading RGBA instead would keep 377 MB of VRAM.
+    const err = gl.getError();
     const w = source.width;
     const h = source.height;
     if (typeof source.close === 'function') source.close();
+    if (err !== gl.NO_ERROR) {
+      gl.deleteTexture(tex);
+      throw new Error(`texture: ${key} upload GL error 0x${err.toString(16)}`);
+    }
     return { tex, w, h };
   }
 
@@ -478,7 +499,7 @@
             if (typeof source.close === 'function') source.close();
             return;
           }
-          const up = uploadTexture(gl, source, nearest);
+          const up = uploadTexture(gl, source, nearest, key);
           c.tex[key] = up.tex;
           c.size[key] = [up.w, up.h];
         }),

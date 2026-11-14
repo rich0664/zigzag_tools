@@ -25,7 +25,7 @@ console.log('built dist/zigzag-fill.user.js');
 const seaHeader = fs.readFileSync(path.join(root, 'src', 'sea-header.txt'), 'utf8').trimEnd();
 const seaConsts = JSON.parse(fs.readFileSync(path.join(root, 'src', 'sea-consts.json'), 'utf8'));
 const SEA_ORDER = ['sea-core.js', 'sea-glsl.js', 'sea-ui.js', 'sea.js'];
-const seaParts = [seaHeader, `const seaConsts = ${JSON.stringify(seaConsts)};`];
+const seaParts = [`const seaConsts = ${JSON.stringify(seaConsts)};`];
 for (const f of SEA_ORDER) {
   let code = fs.readFileSync(path.join(root, 'src', f), 'utf8');
   if (f === 'sea-core.js') {
@@ -35,5 +35,10 @@ for (const f of SEA_ORDER) {
   code = code.replace(/^export\s+/mg, '');
   seaParts.push(`\n/* ---- ${f} ---- */\n` + code.trim());
 }
-fs.writeFileSync(path.join(root, 'dist', 'zigzag-sea.user.js'), seaParts.join('\n') + '\n');
+// The runtime is wrapped in one IIFE after the userscript header (which stays
+// outside): a page-global `const clamp` would collide with the app or another
+// userscript and throw "Identifier 'clamp' has already been declared", leaving
+// the whole script unrun.
+const seaBody = `(() => {\n${seaParts.join('\n')}\n})();`;
+fs.writeFileSync(path.join(root, 'dist', 'zigzag-sea.user.js'), seaHeader + '\n\n' + seaBody + '\n');
 console.log('built dist/zigzag-sea.user.js');

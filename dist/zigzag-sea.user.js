@@ -7,6 +7,8 @@
 // @grant        none
 // @run-at       document-idle
 // ==/UserScript==
+
+(() => {
 const seaConsts = {"version":"0.3.0","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":8.8,"shelf":29,"flow":2.31,"wave":1.9,"grain":0.06,"foam":0.25,"deep":1,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.12,"par":0.814,"pom":5,"dslow":1,"win":0.28,"wout":0.82,"cycle":7,"warp":3.3,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.057,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.13,0.435,0.594,1]}};
 
 /* ---- sea-core.js ---- */
@@ -1189,7 +1191,20 @@ function mountSeaUi(opts) {
     });
   }
 
-  function uploadTexture(gl, source, nearest) {
+  // The WebP bakes decode to RGBA, but only the channels the shader reads need
+  // to reach the GPU. A sized internal format stores exactly those: RGBA8 for
+  // the colour map, R8 for the two scalar fields, RGB8 for the multi-channel
+  // ones. (Plain RGBA was ~377 MB; this is ~237 MB with the colour map.)
+  const TEX_FORMAT = {
+    colour: ['RGBA8', 'RGBA'],
+    dist: ['R8', 'RED'],            // shader reads .r
+    aux: ['RGB8', 'RGB'],           // .r depth, .gb along
+    flow: ['RGB8', 'RGB'],          // .rg direction, .b the coarse-only speed
+    speed: ['R8', 'RED'],           // shader reads .r
+  };
+
+  function uploadTexture(gl, source, nearest, key) {
+    const [internal, format] = TEX_FORMAT[key];
     const tex = gl.createTexture();
     const f = nearest ? gl.NEAREST : gl.LINEAR;
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -1197,11 +1212,19 @@ function mountSeaUi(opts) {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, f);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, f);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);   // required for R8/RGB8 rows
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl[internal], gl[format], gl.UNSIGNED_BYTE, source);
+    // A browser that rejects this internalformat/source pair must fail loudly:
+    // silently uploading RGBA instead would keep 377 MB of VRAM.
+    const err = gl.getError();
     const w = source.width;
     const h = source.height;
     if (typeof source.close === 'function') source.close();
+    if (err !== gl.NO_ERROR) {
+      gl.deleteTexture(tex);
+      throw new Error(`texture: ${key} upload GL error 0x${err.toString(16)}`);
+    }
     return { tex, w, h };
   }
 
@@ -1305,7 +1328,7 @@ function mountSeaUi(opts) {
             if (typeof source.close === 'function') source.close();
             return;
           }
-          const up = uploadTexture(gl, source, nearest);
+          const up = uploadTexture(gl, source, nearest, key);
           c.tex[key] = up.tex;
           c.size[key] = [up.w, up.h];
         }),
@@ -2023,4 +2046,5 @@ function mountSeaUi(opts) {
   } else if (state.on) {
     startStatic();
   }
+})();
 })();
