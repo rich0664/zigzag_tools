@@ -173,20 +173,28 @@ Encoding and precision:
   per-crop). The full-map maximum is measured once, frozen in the shared
   constants, and used by both the baker and the shader. Magnitude matters:
   the LOD blend is deliberately unnormalised.
-- Depth is `1 − height`, where height is the preset's height node evaluated on
-  the same exact distance field (`n_height` is a pure function of distance:
-  `deep_dist 1300`, `ramp`, `curve 4`, `out_curve` as saved). No editor render
-  is needed. Depth is zeroed on land using the map raster's alpha, holes
-  filled, exactly as the prototype's baker does.
+- Depth is `1 − height` from the preset's **final** height field, after its
+  filters — that is what the prototype's `bake_depth.py` reads (`ctx["h"]`),
+  not the bare height node. There is no full-map height plane on disk, so
+  `tools/sea_full.py` gains a `--dump-height` flag that writes
+  `out/sea/height_full.npy` during one full render (~11 min, ~5 GB), once.
+  Normalisation is the percentile stretch `(h − p1) / (p99 − p1)`, computed
+  over the whole map and frozen in the constants. If the live comparison
+  against the prototype crop drifts past the 2/255 tolerance, the frozen
+  numbers become the prototype crop's `lo/hi` instead, and the reason is
+  recorded next to them.
+- Depth is zeroed on land using the map raster's alpha, holes filled, exactly
+  as the prototype's baker does.
 - Speed and depth use fixed 0–255 ranges; no other scale is baked in.
 
 Baking:
 
 - The baker is promoted to `tools/bake_shader_assets.py` and runs over the
   whole map. It takes `out/sea/dist_full.npy` (exact EDT),
-  `out/sea/currents_uv.npy`, `out/sea/full_interesting_v1.png` and
-  `out/sea/map.png`, and writes the five `dist/` files above. The prototype's
-  `bake.py` stays as the crop reference until parity is verified, then goes.
+  `out/sea/currents_uv.npy`, `out/sea/full_interesting_v1.png`,
+  `out/sea/height_full.npy` and `out/sea/map.png`, and writes the five
+  `dist/` files above. The prototype's `bake.py` stays as the crop reference
+  until parity is verified, then goes.
 - Every field is computed from full-map arrays, never per crop. The 16-tile
   flow is a block-average of `currents_uv.npy`; the detail blend is computed
   at 2 tiles/texel only because the speed field is derived from it, and the
