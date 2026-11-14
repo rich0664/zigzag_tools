@@ -107,13 +107,71 @@
 
   const deckCanvas = () => document.getElementById('deckgl-overlay');
 
-  // deck's view state lives on the React fiber of its canvas
-  function viewState(deck) {
-    const key = Object.keys(deck).find(k => k.startsWith('__reactFiber'));
+  // The app hands its Deck instance to the map canvas through an imperative
+  // handle, not through props, so it has to be found in the fiber tree: the
+  // fiber's stateNode may carry it, otherwise a hook's current ref does. Only a
+  // Deck whose own canvas is this canvas will do; the find is cached because
+  // the fibers are walked on every frame.
+  let deckInstance = null;
+  function findDeck(canvas) {
+    if (deckInstance && deckInstance.canvas === canvas) return deckInstance;
+    const key = Object.keys(canvas).find(k => k.startsWith('__reactFiber'));
     if (!key) return null;
-    let f = deck[key];
-    while (f && !(f.memoizedProps && f.memoizedProps.viewState)) f = f.return;
-    return f ? f.memoizedProps.viewState : null;
+    const isDeck = v => !!(v && v.canvas === canvas && v.viewManager);
+    for (let f = canvas[key]; f; f = f.return) {
+      if (isDeck(f.stateNode && f.stateNode.deck)) return (deckInstance = f.stateNode.deck);
+      for (let hook = f.memoizedState; hook; hook = hook.next) {
+        if (isDeck(hook.memoizedState && hook.memoizedState.current && hook.memoizedState.current.deck)) {
+          return (deckInstance = hook.memoizedState.current.deck);
+        }
+      }
+    }
+    return null;
+  }
+
+  // The controller updates deck.viewManager.viewState synchronously, while the
+  // app's React state (the viewState prop) commits a frame or more later.
+  // Reading the prop made the sea trail the map while panning, so the live
+  // manager state wins and the prop is only a fallback. Every camera consumer
+  // (2D draw, GL draw, bench, debugRender's live default) goes through here.
+  function viewState(canvas) {
+    const deck = findDeck(canvas);
+    const propsState = () => {
+      const key = Object.keys(canvas).find(k => k.startsWith('__reactFiber'));
+      if (key) {
+        for (let f = canvas[key]; f; f = f.return) {
+          const vs = f.memoizedProps && f.memoizedProps.viewState;
+          if (vs) return vs;
+        }
+      }
+      return (deck && deck.props && deck.props.viewState) || null;
+    };
+    const live = deck && deck.viewManager && deck.viewManager.viewState;
+    // the controller always publishes a complete viewState: take it as is and
+    // leave the React fibers alone
+    if (live && live.target && isFinite(live.zoom) && live.padding) {
+      return { source: 'viewManager', target: live.target, zoom: live.zoom, padding: live.padding };
+    }
+    const fallback = propsState() || {};
+    // a partial live update still wins for the fields it carries
+    if (live && (live.target || isFinite(live.zoom))) {
+      return {
+        source: 'viewManager',
+        target: live.target || fallback.target,
+        zoom: isFinite(live.zoom) ? live.zoom : fallback.zoom,
+        padding: live.padding || fallback.padding,
+      };
+    }
+    return fallback.target
+      ? { source: 'props', target: fallback.target, zoom: fallback.zoom, padding: fallback.padding }
+      : null;
+  }
+
+  function liveViewState() {
+    const c = deckCanvas();
+    const vs = c && viewState(c);
+    if (!vs) return null;
+    return { source: vs.source, target: vs.target, zoom: vs.zoom, padding: vs.padding };
   }
 
   // ---- static 2D path ------------------------------------------------------
@@ -966,12 +1024,26 @@
   function debugRender(opts) {
     opts = opts || {};
     if (!glc || !glc.ready || glc.lost) throw new Error('gl path not ready');
+    // no tx/ty: render the live view through the same camera the loop uses
+    let live = null;
+    if (opts.tx === undefined && opts.ty === undefined) {
+      const c = deckCanvas();
+      const vs = c && viewState(c);
+      if (!vs) throw new Error('debugRender has no live camera');
+      live = seaTarget(vs);
+      opts = {
+        ...opts,
+        zoom: opts.zoom === undefined ? 2 ** vs.zoom : opts.zoom,
+        width: opts.width === undefined ? (c.clientWidth || c.width) : opts.width,
+        height: opts.height === undefined ? (c.clientHeight || c.height) : opts.height,
+      };
+    }
     const w = Math.max(1, Math.round(Number(opts.width)));
     const h = Math.max(1, Math.round(Number(opts.height)));
     const zoom = Number(opts.zoom);
     const t = opts.t === undefined ? 0 : Number(opts.t);
-    const tx = Number(opts.tx);
-    const ty = Number(opts.ty);
+    const tx = live ? live[0] : Number(opts.tx);
+    const ty = live ? live[1] : Number(opts.ty);
     if (![w, h, zoom, t, tx, ty].every(isFinite)) {
       throw new Error('debugRender needs finite tx, ty, width, height, zoom');
     }
@@ -1151,6 +1223,7 @@
 
   state.setMode = setMode;
   state.debugRender = debugRender;
+  state.liveViewState = liveViewState;
   state.bench = bench;
   state.retry = retry;
   state.setFps30 = setFps30;
