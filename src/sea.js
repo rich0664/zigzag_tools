@@ -668,6 +668,12 @@
     return { cssW, cssH, w, h, scale };
   }
 
+  // deck's target[1] is the map's page row (larger = further down the page)
+  // and the bakes store the map with south at row 0, so the shader's texture
+  // row is MAP_H - 1 - target.y. x is a pixel centre, as the 2D path uses.
+  // debugRender takes texture rows directly and never goes through this.
+  const seaTarget = vs => [vs.target[0] + 0.5, MAP_H - 1 - vs.target[1]];
+
   function drawGL(t) {
     if (!glc || !glc.ready || glc.lost) return;
     const deck = deckCanvas();
@@ -693,8 +699,9 @@
     }
 
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
+    const target = seaTarget(vs);
     renderFrame(glc, w, h, {
-      tx: vs.target[0], ty: vs.target[1],
+      tx: target[0], ty: target[1],
       zoom: cam.zoomPx, zoomCss: cam.zoomPx / scale,
       centerX: cam.centerX, centerY: cam.centerY,
     }, t, settings);
@@ -1047,8 +1054,9 @@
       if (!sized) throw new Error('no viewport');
 
       const cam = cameraUniforms(vs, sized.cssW, sized.cssH, sized.w, sized.h);
+      const target = seaTarget(vs);
       const frame = {
-        tx: vs.target[0], ty: vs.target[1],
+        tx: target[0], ty: target[1],
         zoom: cam.zoomPx, zoomCss: cam.zoomPx / sized.scale,
         centerX: cam.centerX, centerY: cam.centerY,
       };

@@ -111,8 +111,11 @@ float within01(vec2 uv) {
 }
 
 void main() {
+  // y is bottom-origin, like gl_FragCoord: the sea's texture rows run south at
+  // row 0 to north at the last row, so world y grows upward on screen. (The
+  // prototype's y-down world was mirrored against the real map; R17.)
   vec2 world = uTarget + vec2(gl_FragCoord.x - uCenter.x,
-                              uCenter.y - gl_FragCoord.y) / uZoom;
+                              gl_FragCoord.y - uCenter.y) / uZoom;
   // effects live on the texture's own pixel grid (1 texel = 1 tile), not on
   // the screen grid, so the grain matches the map's grain at every zoom
   vec2 p = mix(world, floor(world) + 0.5, uSnap);

@@ -100,7 +100,9 @@ function cameraUniforms(vs, cssW, cssH, backingW, backingH) {
   return {
     zoomPx: 2 ** vs.zoom * scale,
     centerX: (cssW / 2 + dx) * scale,
-    centerY: (cssH / 2 + dy) * scale,
+    // gl_FragCoord is bottom-origin, so the padded centre (measured from the
+    // top, as deck measures padding) flips into the shader's y
+    centerY: backingH - (cssH / 2 + dy) * scale,
     viewW: backingW,
     viewH: backingH,
   };
@@ -233,8 +235,11 @@ float within01(vec2 uv) {
 }
 
 void main() {
+  // y is bottom-origin, like gl_FragCoord: the sea's texture rows run south at
+  // row 0 to north at the last row, so world y grows upward on screen. (The
+  // prototype's y-down world was mirrored against the real map; R17.)
   vec2 world = uTarget + vec2(gl_FragCoord.x - uCenter.x,
-                              uCenter.y - gl_FragCoord.y) / uZoom;
+                              gl_FragCoord.y - uCenter.y) / uZoom;
   // effects live on the texture's own pixel grid (1 texel = 1 tile), not on
   // the screen grid, so the grain matches the map's grain at every zoom
   vec2 p = mix(world, floor(world) + 0.5, uSnap);
@@ -1497,6 +1502,12 @@ function mountSeaUi(opts) {
     return { cssW, cssH, w, h, scale };
   }
 
+  // deck's target[1] is the map's page row (larger = further down the page)
+  // and the bakes store the map with south at row 0, so the shader's texture
+  // row is MAP_H - 1 - target.y. x is a pixel centre, as the 2D path uses.
+  // debugRender takes texture rows directly and never goes through this.
+  const seaTarget = vs => [vs.target[0] + 0.5, MAP_H - 1 - vs.target[1]];
+
   function drawGL(t) {
     if (!glc || !glc.ready || glc.lost) return;
     const deck = deckCanvas();
@@ -1522,8 +1533,9 @@ function mountSeaUi(opts) {
     }
 
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
+    const target = seaTarget(vs);
     renderFrame(glc, w, h, {
-      tx: vs.target[0], ty: vs.target[1],
+      tx: target[0], ty: target[1],
       zoom: cam.zoomPx, zoomCss: cam.zoomPx / scale,
       centerX: cam.centerX, centerY: cam.centerY,
     }, t, settings);
@@ -1876,8 +1888,9 @@ function mountSeaUi(opts) {
       if (!sized) throw new Error('no viewport');
 
       const cam = cameraUniforms(vs, sized.cssW, sized.cssH, sized.w, sized.h);
+      const target = seaTarget(vs);
       const frame = {
-        tx: vs.target[0], ty: vs.target[1],
+        tx: target[0], ty: target[1],
         zoom: cam.zoomPx, zoomCss: cam.zoomPx / sized.scale,
         centerX: cam.centerX, centerY: cam.centerY,
       };

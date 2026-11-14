@@ -266,7 +266,19 @@ describe('cameraUniforms', () => {
     const c = cameraUniforms(vs(0, { left: 68 }), 1000, 500, 1000, 500);
     assert.equal(c.centerX, 534);
     const c2 = cameraUniforms(vs(0, { top: 40 }), 1000, 500, 2000, 1000);
-    assert.equal(c2.centerY, 540);
+    // bottom-origin: a top inset moves the centre up, i.e. below the middle in
+    // gl_FragCoord's y (1000 - (250 + 20) * 2)
+    assert.equal(c2.centerY, 460);
+  });
+
+  // The shader's y is bottom-origin while deck measures padding from the top;
+  // an asymmetric top/bottom pair is the case that catches a missing flip.
+  it('flips asymmetric top/bottom padding into the shader space', () => {
+    const c = cameraUniforms(vs(0, { top: 40, bottom: 100 }), 1000, 500, 2000, 1000);
+    assert.equal(c.centerY, 560);          // 1000 - ((250 - 30) * 2)
+    const back = cameraUniforms(vs(0, { top: 100, bottom: 40 }), 1000, 500, 2000, 1000);
+    assert.equal(back.centerY, 440);       // 1000 - ((250 + 30) * 2)
+    assert.equal(c.centerY + back.centerY, 1000);   // mirrored padding mirrors the centre
   });
 });
 

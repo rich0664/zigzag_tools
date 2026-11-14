@@ -87,7 +87,9 @@ function cameraUniforms(vs, cssW, cssH, backingW, backingH) {
   return {
     zoomPx: 2 ** vs.zoom * scale,
     centerX: (cssW / 2 + dx) * scale,
-    centerY: (cssH / 2 + dy) * scale,
+    // gl_FragCoord is bottom-origin, so the padded centre (measured from the
+    // top, as deck measures padding) flips into the shader's y
+    centerY: backingH - (cssH / 2 + dy) * scale,
     viewW: backingW,
     viewH: backingH,
   };
