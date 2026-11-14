@@ -1021,6 +1021,13 @@ function mountSeaUi(opts) {
     c.drawImage(img, sx0, sy0, sx1 - sx0, sy1 - sy0, sx0, sy0, sx1 - sx0, sy1 - sy0);
 
     state.draws++;
+
+    // A lost WebGL canvas keeps its last composited frame. Hide (never remove)
+    // it only now that the 2D replacement has painted, so there is never a
+    // frame with no visible sea layer; webglcontextrestored still finds it.
+    if (glc && glc.lost && glc.canvas && glc.canvas.style.display !== 'none') {
+      glc.canvas.style.display = 'none';
+    }
   }
 
   function staticTick() {
@@ -1061,6 +1068,10 @@ function mountSeaUi(opts) {
         state.img = img;
         state.sig = '';
         if (staticVisible()) startStatic();
+        // A ready animated renderer already has the colour pixels in its
+        // texture; a pending static/fallback decode must not leave the bitmap
+        // resident after an animated mode resumes.
+        if (glc && glc.ready && !glc.lost && state.mode !== 'static') state.img = null;
         resolve(img);
       };
       img.onerror = () => {
@@ -1326,6 +1337,15 @@ function mountSeaUi(opts) {
     });
   }
 
+  // Paint the 2D path over a lost context. drawStatic hides the lost canvas
+  // only after it has actually painted; until then the retained GL frame is
+  // the visible sea.
+  function paintStaticOverLost() {
+    state.sig = '';
+    try { drawStatic(); } catch (e) { state.error = errText(e); }
+    startStatic();
+  }
+
   // A lost context keeps its canvas and listeners so the browser can restore
   // it. The live mode falls back immediately; the requested animated mode is
   // remembered for the restored event.
@@ -1342,12 +1362,17 @@ function mountSeaUi(opts) {
     holdStatic = false;
     state.error = 'context lost' +
       (e && e.statusMessage ? ': ' + e.statusMessage : '');
-    if (c.canvas) c.canvas.style.display = 'none';
+    // The lost canvas still shows its last composited frame. Keep it visible
+    // until the 2D replacement paints; drawStatic hides it after that.
     if (state.img) {
-      try { drawStatic(); } catch (err) { state.error = errText(err); }
-      startStatic();
+      paintStaticOverLost();
     } else {
-      loadColour().catch(() => {});
+      loadColour().then(() => {
+        if (glc !== c || !c.lost) return;
+        paintStaticOverLost();
+      }).catch(err => {
+        if (glc === c) { state.error = errText(err); refreshUi(); }
+      });
     }
     refreshUi();
   }
@@ -1483,14 +1508,16 @@ function mountSeaUi(opts) {
 
     // The first real frame means the 2D canvas can go: the opaque-enough water
     // is already in the drawing buffer, so removing it cannot show a blank.
-    // The colour decode it was holding is freed too; the GPU copy is enough
-    // while animated.
     if (!glc.first && state.on) {
       glc.first = true;
       holdStatic = false;
       removeStaticCanvas();
-      state.img = null;
     }
+    // Any live animated frame owns the colour pixels; holding the decoded
+    // bitmap as well keeps ~163 MB resident. This also covers a fast
+    // static -> animated round trip where a pending static decode resolves
+    // after the animated loop has resumed.
+    if (state.img && state.mode !== 'static') state.img = null;
   }
 
   function glTick(now) {
@@ -1534,14 +1561,18 @@ function mountSeaUi(opts) {
     state.sig = '';
     holdStatic = false;
     if (glc && glc.lost) {
-      // keep the lost canvas alive for webglcontextrestored
+      // keep the lost canvas alive for webglcontextrestored; it stays visible
+      // until the 2D path paints over it
       stopGL();
-      if (glc.canvas) glc.canvas.style.display = 'none';
       if (state.img) {
-        try { drawStatic(); } catch (e) { state.error = errText(e); }
-        startStatic();
+        paintStaticOverLost();
       } else {
-        loadColour().catch(() => {});
+        loadColour().then(() => {
+          if (glc && glc.lost) paintStaticOverLost();
+        }).catch(e => {
+          state.error = errText(e);
+          refreshUi();
+        });
       }
       refreshUi();
       return;
