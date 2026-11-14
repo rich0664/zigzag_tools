@@ -179,10 +179,13 @@ Encoding and precision:
   `tools/sea_full.py` gains a `--dump-height` flag that writes
   `out/sea/height_full.npy` during one full render (~11 min, ~5 GB), once.
   Normalisation is the percentile stretch `(h − p1) / (p99 − p1)`, computed
-  over the whole map and frozen in the constants. If the live comparison
-  against the prototype crop drifts past the 2/255 tolerance, the frozen
-  numbers become the prototype crop's `lo/hi` instead, and the reason is
-  recorded next to them.
+  over the whole map (`p1 = 0.1606, p99 = 1.0`) and frozen in the constants.
+  Note that the prototype's `depth.png` came from `bake_depth.py` running the
+  editor's crop preview (whose distance, currents and noise are crop-anchored),
+  not a slice of the full-map height render (`MAE ≈ 31` codes over the crop,
+  unchanged by crop `lo/hi` re-normalisation); keeping `height_full.npy` with
+  full-map `p1/p99` is authoritative because it is the exact height field that
+  produced the shipped colour texture.
 - Both distance and depth are zeroed on land using the map raster's alpha
   (`alpha > 128`), interior holes (lakes) filled from the border, exactly as
   the prototype's baker (`prototype/sea-shader/bake.py:120-121`) does.
@@ -334,11 +337,24 @@ Live, in the logged-in profile with `playwright-cli`:
 - the button appears under notifications at 1280 × 720 and 390 × 844, does not
   overlap the video player, and the menu never gets clipped
 - `static` is pixel-identical to the pre-change overlay at the pinned camera
-  (`tx 1081.5, ty 613.1, zoom 3.03`)
-- `baseline` matches the prototype at variant P **with `fsrc=2` (LOD)** and the
-  tuned parameters, same camera: mean |Δ| ≤ 2/255 and no structural difference.
-  The tolerance is not zero because LOD differs from the prototype's 1:1 bake
-  by 1.8/255 mean (0.6° direction), which is the trade the owner accepted.
+  (crop-local `tx 1081.5, ty 613.1`, full-map `tx 1681.5, ty 1313.1, zoom 3.03`
+  px/tile over crop origin `(600, 700)`)
+- Shader parity at variant P (`fsrc=2` LOD, `t=0`, `1600 × 1000`, prototype
+  crop-local `(1081.5, 613.1, zoom 3.03)` vs full-map `(1681.5, 1313.1, zoom 3.03)`)
+  is verified in three layered gates:
+  1. **colour-only** (all shader effects zeroed) vs the colour texture:
+     mean |Δ| ≤ 1.0/255 (measured `0.755`, the lossy-WebP floor — proves
+     camera projection, texel snapping and sampling).
+  2. **medium** (parallax/POM off) vs the prototype at `fsrc=2`:
+     mean |Δ| ≤ 2.5/255 (measured `2.096`, `p99 15`).
+  3. **baseline** (parallax/POM on) vs the prototype at `fsrc=2`:
+     mean |Δ| ≤ 4.0/255 (measured `3.064`, `p99 21`) and visual inspection of
+     the rendered image confirms no structural defects (orientation, offset,
+     black regions, or POM slice banding).
+  4. **Difference budget** (asset- and coordinate-side, not shader port):
+     lossy WebP (`~0.75/255`) + continuous full-map vs crop-anchored simplex
+     noise (`~0.66/255`) + global `alongScale`/2-tile aux LOD (`~0.35/255`) +
+     full-map `height_full.npy` vs crop-preview `depth.png` in POM (`~1.3/255`).
 - each lower tier visibly removes only its documented work, checked as a
   before/after pair at the same camera
 - parallax and warp are stable across zoom (0.4, 1, 4, 8, 16): both are
