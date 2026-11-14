@@ -12,7 +12,10 @@
 
 ## Global Constraints
 
-- Node 24; `npm test` = `node --test test/*.test.js`; `npm run build` = `node build.mjs`.
+- Node 24 lives at `/home/dev/.local/share/node-v24.22.2-linux-x64/bin` and is
+  not on the non-interactive PATH; prefix every shell step with
+  `export PATH=/home/dev/.local/share/node-v24.22.2-linux-x64/bin:$PATH`.
+  `npm test` = `node --test test/*.test.js`; `npm run build` = `node build.mjs`.
 - No new runtime dependencies in the userscript. No bundler beyond `build.mjs`.
 - `playwright-cli` is at `/home/dev/.local/share/node-v24.22.2-linux-x64/bin/playwright-cli`; the logged-in zig~zag profile is `/home/dev/.local/share/agent-browser/zigzag`; use session `-s zigzag`.
 - Userscript version goes to `0.3.0` in `src/sea-header.txt`; every asset URL carries `?v=0.3.0`.
@@ -60,7 +63,13 @@ Each of these has a test in the task that owns the behaviour.
 
 - [ ] **Step 1: Add the flag and the dump**
 
-Add `--dump-height` to the argparse in `main()`. In the strip loop, after `ctx = ed.evaluate(region=region)`, copy `ctx["h"]` into a preallocated `np.zeros((H, W), np.float16)` at the strip's offset. After the loop, `np.save("out/sea/height_full.npy", full)`. Print `height p1/p99` over the whole array.
+Add `--dump-height` to the argparse in `main()`. The default is the single-pass
+path (`if not args.strips:`, `tools/sea_full.py:112-130`) — that is what built
+the shipped texture, so dump there, not in the strip loop: after
+`ctx = ed.evaluate(...)`, take `ctx["h"]`, convert to `float16`, and
+`np.save("out/sea/height_full.npy", h)`. Print `height p1/p99` over the whole
+array. Leave the PNG write untouched. Also add the same dump to the strip
+branch for completeness, writing 0..1 float16 directly into the strip's rows.
 
 - [ ] **Step 2: Run it once**
 
@@ -337,7 +346,7 @@ In the sea section: read `src/sea-consts.json`, then concatenate in order `['sea
 
 - [ ] **Step 5: Rewrite `src/sea.js` onto the core**
 
-Keep today's draw function and camera maths but source `state` from `parseState({...localStorage})`, mode from `pickMode(state.mode, {webgl2:false, ...})` for now (the probe arrives in Task 5), opacity from `state.opacity`, and remove the bottom-right slider entirely (the menu is Task 7). The 2D canvas path, its z-order, `state.draws`, and `window.__zzSea` stay. Default to `static` for now so the look is unchanged.
+Keep today's draw function and camera maths but source `state` from `parseState({...localStorage})`, mode from `pickMode(state.mode, {webgl2:false, ...})` for now (the real capability probe arrives in Task 8), opacity from `state.opacity`, and remove the bottom-right slider entirely (the menu is Task 7). The 2D canvas path, its z-order, `state.draws`, and `window.__zzSea` stay. Default to `static` for now so the look is unchanged.
 
 - [ ] **Step 6: Build and verify pixel parity**
 
@@ -512,7 +521,7 @@ git commit -m "sea: quality tiers, 30 fps gate, brightness"
 
 Button: 30 × 30, transparent, label on hover, title `sea`. Copy `font-family`, `font-size`, `letter-spacing`, `color` from the notifications button's computed style at mount. Click toggles the menu; `Escape` and a `pointerdown` outside close it; the button is a real `<button>` with `aria-haspopup`/`aria-expanded`.
 
-Menu: dark panel (`#0a1016ee`, 1px `#ffffff22`, 6px radius, 12px padding), items in this order: sea on/off; quality radios for the five ids (disabled when `__zzSea.canUseShader === false`, with a note line); opacity range 0–100; brightness range 50–150; `30 fps limit` checkbox. Every change calls `onChange` and persists.
+Menu: dark panel (`#0a1016ee`, 1px `#ffffff22`, 6px radius, 12px padding), items in this order: sea on/off; quality radios for the five ids (disabled when `__zzSea.canUseShader === false`, with a note line); opacity range 0–100; brightness range 50–150; `30 fps limit` checkbox; and an empty status line `<div id="zz-sea-status">` that Task 8 fills with loading/error/retry text. Every change calls `onChange` and persists.
 
 The menu is appended to `document.body` (the header has `contain: paint`, so a menu inside it would be clipped). It flips above the button if `rect.bottom + menuHeight > innerHeight`.
 
