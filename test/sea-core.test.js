@@ -229,4 +229,15 @@ describe('assetUrl', () => {
       assert.match(assetUrl(`zigzag-sea-${name}.webp`), /\?v=0\.3\.0$/);
     }
   });
+
+  it('accepts a base override for local builds', () => {
+    assert.equal(
+      assetUrl('zigzag-sea-dist.webp', 'http://127.0.0.1:3006'),
+      'http://127.0.0.1:3006/zigzag-sea-dist.webp?v=0.3.0',
+    );
+    assert.equal(
+      assetUrl('zigzag-sea-dist.webp', undefined),
+      `${seaConsts.assetBase}/zigzag-sea-dist.webp?v=${seaConsts.version}`,
+    );
+  });
 });

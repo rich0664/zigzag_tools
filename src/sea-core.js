@@ -90,8 +90,8 @@ function fpsGate(now, nextAt, fps30) {
   return { draw, nextAt: draw ? now + 1000 / 30 : nextAt };
 }
 
-function assetUrl(name) {
-  return `${seaConsts.assetBase}/${name}?v=${seaConsts.version}`;
+function assetUrl(name, base = seaConsts.assetBase) {
+  return `${base}/${name}?v=${seaConsts.version}`;
 }
 
 export {
