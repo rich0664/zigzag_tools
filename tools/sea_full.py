@@ -38,6 +38,18 @@ def _peak_mb():
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
 
 
+HEIGHT_PATH = os.path.join(WORK, "height_full.npy")
+
+
+def _save_height(path, h):
+    """Write the final filtered height as 0..1 float16, one value per tile."""
+    np.save(path, h)
+    lo, hi = np.percentile(np.asarray(h, dtype=np.float32), [1, 99])
+    print(f"height p1 {lo:.4f} p99 {hi:.4f} "
+          f"{h.shape[0]}x{h.shape[1]} float16", flush=True)
+    print("wrote", path, flush=True)
+
+
 def apply_preset(name):
     path = os.path.join(PRESETS, name + ".json")
     with open(path) as f:
@@ -71,6 +83,9 @@ def main():
                          "interrupt, but every filter is anchored to its crop, "
                          "so noise, erosion and drainage band at the seams")
     ap.add_argument("--min-free-mb", type=int, default=900)
+    ap.add_argument("--dump-height", action="store_true",
+                    help="also save the final height to "
+                         "out/sea/height_full.npy")
     args = ap.parse_args()
 
     apply_preset(args.preset)
@@ -127,9 +142,13 @@ def main():
         Image.fromarray(canvas, "RGB").save(out)
         print("wrote", out, canvas.shape, f"in {time.time() - t0:.0f}s",
               f"peak rss {_peak_mb():.0f} MB")
+        if args.dump_height:
+            _save_height(HEIGHT_PATH, np.asarray(ctx["h"], dtype=np.float16))
         return
 
     canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    h_plane = (np.zeros((out_h, out_w), dtype=np.float16)
+               if args.dump_height else None)
     total = (out_h + args.strip - 1) // args.strip
     t_all = time.time()
     for i, y in enumerate(range(0, out_h, args.strip)):
@@ -141,6 +160,9 @@ def main():
         ctx = ed.evaluate(region=region)
         rgb = ed.channel_image(ctx, "output")
         canvas[y:y1] = rgb[y - ry0:y - ry0 + (y1 - y)]
+        if h_plane is not None:
+            h16 = np.asarray(ctx["h"], dtype=np.float16)
+            h_plane[y:y1] = h16[y - ry0:y - ry0 + (y1 - y)]
         print(f"strip {i + 1}/{total} rows {y}-{y1} "
               f"({time.time() - t_all:.0f}s)", flush=True)
 
@@ -148,6 +170,8 @@ def main():
     Image.fromarray(canvas, "RGB").save(out)
     print("wrote", out, canvas.shape, f"in {time.time() - t_all:.0f}s",
           f"peak rss {_peak_mb():.0f} MB")
+    if h_plane is not None:
+        _save_height(HEIGHT_PATH, h_plane)
 
 
 if __name__ == "__main__":
