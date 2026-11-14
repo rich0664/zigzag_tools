@@ -237,7 +237,10 @@ its 0.5 after the cap.
 
 - Camera: reuse the existing React-fiber `viewState` read and the
   orthographic maths from `src/sea.js`. The shader receives view size, target,
-  zoom (device px), map size and crop origin `(0, 0)`.
+  zoom (device px) and map size; the live target is converted to the map's
+  texture row (`ty = MAP_H - 1 - target[1]`, `tx = target[0] + 0.5`) and
+  `uCenter` is bottom-origin, because `gl_FragCoord` is. `debugRender`'s
+  explicit `tx/ty` are texture rows by contract.
 - Composition: full-screen triangle, colour texture sampled with nearest
   filtering on texel-res, shader in the prototype's `index.html` reused nearly
   verbatim, with the crop bounds replaced by the full map and the two aux

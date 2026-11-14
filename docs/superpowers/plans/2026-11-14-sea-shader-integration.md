@@ -404,7 +404,7 @@ Create `src/sea-glsl.js` exporting `VERT` and `FRAG` template strings, copied fr
 - `uAux` is a `3875 × 2627` grid (`ceil(7749/2) × ceil(5254/2)`, 2 tiles/texel, spanning `uAuxSpan = vec2(3875.0 * 2.0, 2627.0 * 2.0) = vec2(7750.0, 5254.0)` tiles over the `7749 × 5254` map): sample at `q / uAuxSpan`, with `uAux.r` as `depth01` and `along = (texture(uAux, p / uAuxSpan).gb * 2.0 - 1.0) * uAlongScale` (`uAlongScale = seaConsts.alongScale = 1.03`).
 - `uSpeedTex` (`1937 × 1313`, 4 tiles/texel) is sampled over its full-map tile span (`p / (4.0 * uSpeedSize)` = `p / vec2(7748.0, 5252.0)` or `p / uSize`).
 - `uCropOrigin` is removed; `uSize` is the full map (`7749 × 5254`).
-- `uniform vec2 uCenter;` and `world = uTarget + vec2(gl_FragCoord.x - uCenter.x, uCenter.y - gl_FragCoord.y) / uZoom;`
+- `uniform vec2 uCenter;` and `world = uTarget + vec2(gl_FragCoord.x - uCenter.x, gl_FragCoord.y - uCenter.y) / uZoom;` (gl_FragCoord is bottom-origin). The live camera passes `uTarget` as the map's **texture row**: `tx = target[0] + 0.5`, `ty = MAP_H - 1 - target[1]`, and `centerY` is bottom-origin (`viewH - (cssH/2 + dy) * scale`). `debugRender`'s explicit `tx/ty` are texture rows by contract.
 - Replace the `uLand` composite with `outColor = vec4(col * uBrightness, within01(p / uSize));` and create the context with `alpha: true` — the overlay is transparent outside the map rectangle, as today's 2D overlay is.
 - Add `uniform float uNoiseLayers, uBrightness;` — `uNoiseLayers < 1.5` uses layer A only (skip the B sample and its weight).
 - `uFlowMode`: `0` = coarse only (no along blend), `1` = LOD. `uFlowDetail` sampling is deleted.
