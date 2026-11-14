@@ -146,8 +146,8 @@ the current texture and versioned in the same way.
 | file | size (px) | channels | contents |
 |---|---|---|---|
 | `zigzag-sea.webp` | 7749 × 5254 | RGB | colour map (exists, unchanged) |
-| `zigzag-sea-dist.webp` | 7749 × 5254 | R | **√(distance / 600), clamped**, lossless |
-| `zigzag-sea-aux.webp` | 3875 × 2627 | RGB | R depth (1 − height), G/B along-coast vector, A = 255, lossless |
+| `zigzag-sea-dist.webp` | 7749 × 5254 | R | **√(distance / 600), clamped, zeroed on land/holes**, lossless |
+| `zigzag-sea-aux.webp` | 3875 × 2627 | RGB | R depth (1 − height, zeroed on land/holes), G/B along-coast vector, A = 255, lossless |
 | `zigzag-sea-flow.webp` | 484 × 328 | RG | 16-tile gyre u/v (the prototype's `flow.png`) |
 | `zigzag-sea-speed.webp` | 1937 × 1313 | R | baked speed field (4 tiles/texel), lossless |
 
@@ -183,8 +183,9 @@ Encoding and precision:
   against the prototype crop drifts past the 2/255 tolerance, the frozen
   numbers become the prototype crop's `lo/hi` instead, and the reason is
   recorded next to them.
-- Depth is zeroed on land using the map raster's alpha, holes filled, exactly
-  as the prototype's baker does.
+- Both distance and depth are zeroed on land using the map raster's alpha
+  (`alpha > 128`), interior holes (lakes) filled from the border, exactly as
+  the prototype's baker (`prototype/sea-shader/bake.py:120-121`) does.
 - Speed and depth use fixed 0–255 ranges; no other scale is baked in.
 
 Baking:
@@ -237,8 +238,10 @@ its 0.5 after the cap.
 - Composition: full-screen triangle, colour texture sampled with nearest
   filtering on texel-res, shader in the prototype's `index.html` reused nearly
   verbatim, with the crop bounds replaced by the full map and the two aux
-  samplers rewired to the shipped layout (`uDist.r` → distance,
-  `uAux.r` → depth, `uAux.gb * 2 − 1` → along). No other GLSL logic changes.
+  samplers rewired to the shipped layout (`uDist.r` → distance `t * t * 600`,
+  `uAux.r` → depth, `(uAux.gb * 2 − 1) * uAlongScale` → along, with `uAux`
+  sampled as a 3875 × 2627 2-tile grid over the 7749 × 5254 map). No other
+  GLSL logic changes.
 - Animation: rAF loop only while mode is animated, `on` is true, the document
   is visible, and the camera/texture state is ready; the 30 fps toggle
   time-gates it. `static` draws on camera changes only.

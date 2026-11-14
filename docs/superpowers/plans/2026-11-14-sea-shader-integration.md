@@ -149,14 +149,14 @@ Copy the maths from `prototype/sea-shader/bake.py` into `tools/bake_shader_asset
 
 Deliberate changes:
 
-- distance: `dn = sqrt(clip(d, 0, 600) / 600)`, written to `zigzag-sea-dist.webp` as **lossless** grayscale.
+- distance: `dn = sqrt(clip(d, 0, 600) / 600)`, zeroed on land and filled interior holes (matching `prototype/sea-shader/bake.py:121`), written to `zigzag-sea-dist.webp` as **lossless** grayscale.
 - along: `k_enc = alongScale` from the JSON (not `max(1, max|component|)`). Compute the raw `along_x, along_y` first, print `along-max=<value>` and the p99, and if `alongScale == 1.0` exit after printing so the value can be frozen.
-- aux: at `auxScale` (2) tiles/texel, block-mean of the full-res fields; channels `R = depth`, `G = along_x/alongScale*0.5+0.5`, `B = along_y/alongScale*0.5+0.5`, `A = 255`. Depth is `(h − heightLo) / (heightHi − heightLo)`, clamped, inverted (`1 − depth`), zeroed on land.
+- aux: at `auxScale` (2) tiles/texel (`3875 × 2627`, `ceil(w/2) × ceil(h/2)`), block-mean of the full-res fields; channels `R = depth`, `G = along_x/alongScale*0.5+0.5`, `B = along_y/alongScale*0.5+0.5`, `A = 255`. Depth is `(h − heightLo) / (heightHi − heightLo)`, clamped, inverted (`1 − depth`), zeroed on land and interior holes.
 - flow: block-average `currents_uv.npy` to 484 × 328 (`map_w / 16`), `R = u*0.5+0.5`, `G = v*0.5+0.5`, plus the coherence in `B` exactly as the prototype does.
 - speed: replicate the prototype's `sp_coarse * keep * keep_g` block-averaged to 4 tiles/texel, `R` only.
-- land mask: `map.png` alpha > 128, interior holes filled by flooding from every border pixel (as the prototype's baker does).
+- land mask: `map.png` alpha > 128, interior holes filled by flooding from every border pixel (as the prototype's baker does); zero both distance and depth on this mask.
 
-`--check` validates the written files instead of writing: decode each WebP with `createImageBitmap`-equivalent (Pillow), assert shapes, and sample 1000 random water tiles: `|sqrt(dist_webp*600) − dist_full| < 1`, `depth_webp` within 2 codes of the computed depth, `|along|` within 0.02 of 1.
+`--check` validates the written files instead of writing: decode each WebP with `createImageBitmap`-equivalent (Pillow), assert shapes, and sample 1000 random water tiles: `|dist_webp/255 − sqrt(clip(dist_full, 0, 600)/600)| * 255 <= 1` code in stored space (reporting tile error `|dec^2 * 600 − min(dist_full, 600)|` alongside), `depth_webp` within 2 codes of the computed depth, and decoded-vs-computed `along` within `0.02` in stored space (`hypot(alx − ax2, aly − ay2) <= 0.02`, reporting raw `|along|` percentiles alongside).
 
 - [ ] **Step 2: Freeze the along scale**
 
@@ -400,8 +400,10 @@ Expected: `access-control-allow-origin: *`. If absent, stop and report — the s
 Create `src/sea-glsl.js` exporting `VERT` and `FRAG` template strings, copied from `prototype/sea-shader/index.html` (the `VERT`/`FRAG` constants) with exactly these edits:
 
 - Drop samplers `uLand`, `uFlowDetail`, and all arrow/debug/slice/curve-drag code paths.
-- `uDist` (new sampler) replaces `uAux.r` for distance; `uAux.r` is depth; `along = texture(uAux, p/uSize).gb * 2.0 - 1.0`.
-- `uCropOrigin` is removed; `uSize` is the full map.
+- `uDist` (new sampler, `7749 × 5254`, 1 tile/texel) replaces `uAux.r` for distance, decoded as `d = t * t * uDistMax` (`uDistMax = 600.0`).
+- `uAux` is a `3875 × 2627` grid (`ceil(7749/2) × ceil(5254/2)`, 2 tiles/texel, spanning `uAuxSpan = vec2(3875.0 * 2.0, 2627.0 * 2.0) = vec2(7750.0, 5254.0)` tiles over the `7749 × 5254` map): sample at `q / uAuxSpan`, with `uAux.r` as `depth01` and `along = (texture(uAux, p / uAuxSpan).gb * 2.0 - 1.0) * uAlongScale` (`uAlongScale = seaConsts.alongScale = 1.03`).
+- `uSpeedTex` (`1937 × 1313`, 4 tiles/texel) is sampled over its full-map tile span (`p / (4.0 * uSpeedSize)` = `p / vec2(7748.0, 5252.0)` or `p / uSize`).
+- `uCropOrigin` is removed; `uSize` is the full map (`7749 × 5254`).
 - `uniform vec2 uCenter;` and `world = uTarget + vec2(gl_FragCoord.x - uCenter.x, uCenter.y - gl_FragCoord.y) / uZoom;`
 - Replace the `uLand` composite with `outColor = vec4(col * uBrightness, 1.0);`.
 - Add `uniform float uNoiseLayers, uBrightness;` — `uNoiseLayers < 1.5` uses layer A only (skip the B sample and its weight).
