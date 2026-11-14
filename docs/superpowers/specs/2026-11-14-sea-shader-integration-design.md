@@ -362,7 +362,9 @@ Live, in the logged-in profile with `playwright-cli`:
   proven if the high end does not shear the bed
 - switching mode never leaves the map blank; a failed texture load or a lost
   context falls back to `static` with the message visible
-- off, hidden tab and `static` show no rAF activity in the performance panel
+- off and hidden tab stop all work; `static` draws only when the camera moves
+  (an idle rAF poll remains in v1, as the 0.2.15 overlay had, but it renders
+  nothing and touches no GPU)
 
 Performance acceptance is on the owner's machine, not headless SwiftShader:
 baseline holds 60 fps with a 2560 × 1440 backing store at typical map zoom;
