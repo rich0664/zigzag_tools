@@ -47,12 +47,27 @@
 
   const state = {
     on: saved.on,
-    mode: startupMode,
+    mode: 'static',                // the live mode; the saved one is applied when ready
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
     glReady: false, error: null,
   };
   window.__zzSea = state;
+
+  // The HUD is mounted lazily (the SPA header may not exist yet); the runtime
+  // pushes state changes it makes outside the menu back into it.
+  let seaUi = null;
+  function refreshUi() {
+    if (seaUi) seaUi.refresh(uiState());
+  }
+
+  // An animated mode requested before the deck canvas exists. It is applied by
+  // the watcher below; it is never turned into `static` just because the app is
+  // still rendering.
+  let pendingMode = null;
+  let deckObserver = null;
+  let deckTimer = 0;
+  let deckWatchStart = 0;
 
   const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
 
@@ -473,11 +488,13 @@
 
   function fallbackToStatic(reason) {
     state.error = errText(reason);
+    pendingMode = null;
     releaseGL();
     state.mode = 'static';
     state.sig = '';
     try { drawStatic(); } catch (e) { state.error = errText(e); }
     startStatic();
+    refreshUi();
   }
 
   // ---- mode switch ---------------------------------------------------------
@@ -504,7 +521,58 @@
         try { buildGL(); } catch (e) { fallbackToStatic(e); }
       }
     }
+    refreshUi();
     return state.mode;
+  }
+
+  // ---- deferred mode and the deck watcher ---------------------------------
+  // The userscript can start before the SPA has rendered #deckgl-overlay. An
+  // animated mode requested then waits here; it is applied as soon as the deck
+  // appears, and the saved preference is never rewritten to static for it.
+
+  function stopDeckWatch() {
+    if (deckObserver) { deckObserver.disconnect(); deckObserver = null; }
+    if (deckTimer) { clearInterval(deckTimer); deckTimer = 0; }
+  }
+
+  function applyPendingMode() {
+    if (!pendingMode || !state.on) return false;
+    if (pendingMode !== 'static' && !deckCanvas()) return false;
+    const id = pendingMode;
+    pendingMode = null;
+    stopDeckWatch();
+    try { setMode(id); } catch (e) { fallbackToStatic(e); }
+    return true;
+  }
+
+  function watchForDeck() {
+    if (deckObserver) return;
+    deckWatchStart = Date.now();
+    const target = document.body || document.documentElement;
+    deckObserver = new MutationObserver(() => {
+      if (applyPendingMode()) stopDeckWatch();
+    });
+    deckObserver.observe(target, { childList: true, subtree: true });
+    deckTimer = setInterval(() => {
+      if (applyPendingMode() || Date.now() - deckWatchStart >= 30000) {
+        if (deckTimer) { clearInterval(deckTimer); deckTimer = 0; }
+      }
+    }, 500);
+  }
+
+  // The menu's mode choice: persist the choice, not whatever the live mode
+  // settles on if the app is not ready yet.
+  function requestMode(id) {
+    modeSettings(id);                       // validates, throws on unknown ids
+    if (id !== 'static' && !deckCanvas()) {
+      pendingMode = id;
+      watchForDeck();
+      applyPendingMode();                   // in case it arrived just now
+      return state.mode;
+    }
+    pendingMode = null;
+    stopDeckWatch();
+    try { return setMode(id); } catch (e) { fallbackToStatic(e); return state.mode; }
   }
 
   // One frame at an exact size and camera, read back synchronously. Used by the
@@ -615,6 +683,7 @@
       stopGL();
       return state.on;
     }
+    if (pendingMode && applyPendingMode()) return state.on;
     if (state.mode === 'static') startStatic();
     else if (glc) startGL();
     else setMode(state.mode);
@@ -645,8 +714,8 @@
       localStorage.setItem('zz-sea-on', setOn(patch.on) ? '1' : '0');
     }
     if ('mode' in patch) {
-      const id = setMode(patch.mode);
-      localStorage.setItem('zz-sea-mode', id);
+      requestMode(patch.mode);       // may wait for the deck instead of demoting
+      localStorage.setItem('zz-sea-mode', patch.mode);
     }
     if ('opacity' in patch) {
       localStorage.setItem('zz-sea-opacity', String(setOpacity(patch.opacity)));
@@ -661,7 +730,7 @@
     return uiState();
   }
 
-  mountSeaUi({ getState: uiState, onChange: applyChange });
+  seaUi = mountSeaUi({ getState: uiState, onChange: applyChange });
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); }
@@ -681,13 +750,15 @@
   img.onerror = () => { state.error = 'sea texture failed to load'; };
   img.src = url('zigzag-sea.webp');
 
-  // Honour the saved mode now that both renderers exist. The capability probe
-  // arrives with Task 8, so the animated build is attempted directly; a throw
-  // here (or the async texture failure inside buildGL) lands on static. With
-  // the sea off nothing is built until it is switched back on.
-  if (state.on && state.mode !== 'static') {
-    try { setMode(state.mode); } catch (e) { fallbackToStatic(e); }
-  } else {
-    startStatic();                 // no-op when the sea is off or animated
+  // The saved mode is a preference, not a claim that the app is ready. An
+  // animated saved mode waits for #deckgl-overlay (this SPA renders it after
+  // document-idle); only a real build failure calls fallbackToStatic. The
+  // stored mode is never rewritten just because the app was still rendering.
+  if (startupMode !== 'static') {
+    pendingMode = startupMode;
+    watchForDeck();
+    applyPendingMode();            // no-op until the deck exists / the sea is on
+  } else if (state.on) {
+    startStatic();
   }
 })();
