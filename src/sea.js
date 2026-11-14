@@ -10,8 +10,9 @@
  *               per map tile, smoothing off).
  *   animated  - a WebGL2 full-screen triangle running the ported sea shader
  *               (src/sea-glsl.js) over the full-map distance/aux/flow/speed
- *               bakes. Started only by an explicit setMode(); the startup mode
- *               stays static until the capability probe exists.
+ *               bakes. The startup mode is the saved one; the capability probe
+ *               and its error/retry UI arrive with Task 8, so an animated build
+ *               that throws simply falls back to static.
  */
 (() => {
   'use strict';
@@ -27,7 +28,8 @@
   const errText = e => String((e && e.message) || e);
 
   // Saved values live under the zz-sea-* keys; the pure core parses and clamps
-  // them, and picks the mode. The capability probe arrives with Task 8.
+  // them. The capability probe arrives with Task 8: assume a shader-capable
+  // device for the default choice, and let setMode's failure path fall back.
   const saved = parseState({
     mode: localStorage.getItem('zz-sea-mode'),
     on: localStorage.getItem('zz-sea-on'),
@@ -36,14 +38,16 @@
     fps30: localStorage.getItem('zz-sea-fps'),
   });
 
-  // Until the capability probe exists, no saved mode can render: start static
-  // so the build cannot claim an animated mode it has not verified. The saved
-  // value stays in `saved.mode` for Task 8 to honour.
+  const env = {
+    webgl2: true, maxTextureSize: 8192,
+    coarsePointer: !!(window.matchMedia && matchMedia('(pointer: coarse)').matches),
+    narrow: window.innerWidth < 700,
+  };
+  const startupMode = pickMode(saved.mode, env);   // unknown saved id -> default
+
   const state = {
     on: saved.on,
-    mode: pickMode('', {
-      webgl2: false, maxTextureSize: 0, coarsePointer: false, narrow: false,
-    }),
+    mode: startupMode,
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
     glReady: false, error: null,
@@ -597,11 +601,67 @@
     return state.fps30;
   }
 
+  // Toggling the sea off stops both loops and hides the live canvas; toggling
+  // it back on reuses the current mode (a deferred animated build happens here
+  // when startup was off, so a sea that is off never loads the textures).
+  function setOn(on) {
+    state.on = !!on;
+    for (const id of [OV_ID, GL_ID]) {
+      const c = document.getElementById(id);
+      if (c) c.style.display = state.on ? '' : 'none';
+    }
+    if (!state.on) {
+      stopStatic();
+      stopGL();
+      return state.on;
+    }
+    if (state.mode === 'static') startStatic();
+    else if (glc) startGL();
+    else setMode(state.mode);
+    return state.on;
+  }
+
   state.setMode = setMode;
   state.debugRender = debugRender;
   state.setFps30 = setFps30;
   state.setBrightness = setBrightness;
   state.setOpacity = setOpacity;
+  state.setOn = setOn;
+
+  // ---- menu wiring and persistence ----------------------------------------
+  // The menu reports a patch; this applies it, writes the zz-sea-* key and
+  // returns the state the menu should paint.
+  function uiState() {
+    return {
+      on: state.on, mode: state.mode, opacity: state.opacity,
+      brightness: state.brightness, fps30: state.fps30,
+      canUseShader: state.canUseShader,
+    };
+  }
+
+  function applyChange(patch) {
+    if (!patch) return uiState();
+    if ('on' in patch) {
+      localStorage.setItem('zz-sea-on', setOn(patch.on) ? '1' : '0');
+    }
+    if ('mode' in patch) {
+      const id = setMode(patch.mode);
+      localStorage.setItem('zz-sea-mode', id);
+    }
+    if ('opacity' in patch) {
+      localStorage.setItem('zz-sea-opacity', String(setOpacity(patch.opacity)));
+    }
+    if ('brightness' in patch) {
+      const v = setBrightness(patch.brightness);
+      localStorage.setItem('zz-sea-brightness', String(Math.round(v * 100)));
+    }
+    if ('fps30' in patch) {
+      localStorage.setItem('zz-sea-fps', setFps30(patch.fps30) ? '1' : '0');
+    }
+    return uiState();
+  }
+
+  mountSeaUi({ getState: uiState, onChange: applyChange });
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); }
@@ -621,5 +681,13 @@
   img.onerror = () => { state.error = 'sea texture failed to load'; };
   img.src = url('zigzag-sea.webp');
 
-  startStatic();
+  // Honour the saved mode now that both renderers exist. The capability probe
+  // arrives with Task 8, so the animated build is attempted directly; a throw
+  // here (or the async texture failure inside buildGL) lands on static. With
+  // the sea off nothing is built until it is switched back on.
+  if (state.on && state.mode !== 'static') {
+    try { setMode(state.mode); } catch (e) { fallbackToStatic(e); }
+  } else {
+    startStatic();                 // no-op when the sea is off or animated
+  }
 })();

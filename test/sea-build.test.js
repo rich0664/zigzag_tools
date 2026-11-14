@@ -31,4 +31,16 @@ describe('sea bundle', () => {
   it('mounts the runtime state', () => {
     assert.match(src, /__zzSea/);
   });
+
+  it('contains the HUD menu before the runtime', () => {
+    assert.match(src, /function mountSeaUi\(/);
+    assert.match(src, /id = SEA_UI_BTN_ID/);
+    assert.ok(src.indexOf('/* ---- sea-ui.js ---- */') > 0);
+    assert.ok(src.indexOf('/* ---- sea-ui.js ---- */') < src.indexOf('/* ---- sea.js ---- */'));
+  });
+
+  it('no longer contains the bottom-right slider', () => {
+    assert.doesNotMatch(src, /['"]zz-sea-ui['"]/);
+    assert.doesNotMatch(src, /['"]zz-sea-op['"]/);
+  });
 });

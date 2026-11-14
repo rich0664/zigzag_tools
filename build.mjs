@@ -24,7 +24,7 @@ console.log('built dist/zigzag-fill.user.js');
 // inlined first, then each module with its `export` markers stripped.
 const seaHeader = fs.readFileSync(path.join(root, 'src', 'sea-header.txt'), 'utf8').trimEnd();
 const seaConsts = JSON.parse(fs.readFileSync(path.join(root, 'src', 'sea-consts.json'), 'utf8'));
-const SEA_ORDER = ['sea-core.js', 'sea-glsl.js', 'sea.js'];
+const SEA_ORDER = ['sea-core.js', 'sea-glsl.js', 'sea-ui.js', 'sea.js'];
 const seaParts = [seaHeader, `const seaConsts = ${JSON.stringify(seaConsts)};`];
 for (const f of SEA_ORDER) {
   let code = fs.readFileSync(path.join(root, 'src', f), 'utf8');
