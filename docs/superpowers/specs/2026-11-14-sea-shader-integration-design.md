@@ -337,10 +337,10 @@ Live, in the logged-in profile with `playwright-cli`:
 - the button appears under notifications at 1280 × 720 and 390 × 844, does not
   overlap the video player, and the menu never gets clipped
 - `static` is pixel-identical to the pre-change overlay at the pinned camera
-  (crop-local `tx 1081.5, ty 613.1`, full-map `tx 1681.5, ty 1313.1, zoom 3.03`
-  px/tile over crop origin `(600, 700)`)
+  (crop-local `tx 800, ty 500`, full-map `tx 1400, ty 1200`, `zoom 1` px/tile
+  over crop origin `(600, 700)`)
 - Shader parity at variant P (`fsrc=2` LOD, `t=0`, `1600 × 1000`, prototype
-  crop-local `(1081.5, 613.1, zoom 3.03)` vs full-map `(1681.5, 1313.1, zoom 3.03)`)
+  crop-local `(800, 500, zoom 1)` vs full-map `(1400, 1200, zoom 1)`)
   is verified in three layered gates:
   1. **colour-only** (all shader effects zeroed) vs the colour texture:
      mean |Δ| ≤ 1.0/255 (measured `0.755`, the lossy-WebP floor — proves

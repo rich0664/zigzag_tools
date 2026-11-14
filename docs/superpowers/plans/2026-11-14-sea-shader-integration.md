@@ -405,15 +405,15 @@ Create `src/sea-glsl.js` exporting `VERT` and `FRAG` template strings, copied fr
 - `uSpeedTex` (`1937 × 1313`, 4 tiles/texel) is sampled over its full-map tile span (`p / (4.0 * uSpeedSize)` = `p / vec2(7748.0, 5252.0)` or `p / uSize`).
 - `uCropOrigin` is removed; `uSize` is the full map (`7749 × 5254`).
 - `uniform vec2 uCenter;` and `world = uTarget + vec2(gl_FragCoord.x - uCenter.x, uCenter.y - gl_FragCoord.y) / uZoom;`
-- Replace the `uLand` composite with `outColor = vec4(col * uBrightness, 1.0);`.
+- Replace the `uLand` composite with `outColor = vec4(col * uBrightness, within01(p / uSize));` and create the context with `alpha: true` — the overlay is transparent outside the map rectangle, as today's 2D overlay is.
 - Add `uniform float uNoiseLayers, uBrightness;` — `uNoiseLayers < 1.5` uses layer A only (skip the B sample and its weight).
 - `uFlowMode`: `0` = coarse only (no along blend), `1` = LOD. `uFlowDetail` sampling is deleted.
 - Keep `parShift`'s `uZoomCss / 3.2` and `uSnap = 1` semantics unchanged.
-- Keep the three 1D curve textures, built once from `seaConsts.curves` with 256 texels.
+- Keep the three 1D curve textures, built once from `seaConsts.curves` with 128 texels (the prototype's `makeCurve` resolution).
 
 - [ ] **Step 3: Add the GL path to `src/sea.js`**
 
-On `setMode` to an animated id: remove the 2D canvas, create `<canvas id="zz-sea-gl">` before deck, `getContext('webgl2', {alpha:true, premultipliedAlpha:false, antialias:false, depth:false})`, compile the program, upload `colour/dist/aux/flow/speed` as textures (`TEXTURE_WRAP_S/T = CLAMP_TO_EDGE`, `MIN_FILTER = NEAREST` for colour/aux/dist on texel-res, `LINEAR` for flow/speed), and start the loop. Errors at any point call `fallbackToStatic(reason)`.
+On `setMode` to an animated id: remove the 2D canvas once the first GL frame has drawn, create `<canvas id="zz-sea-gl">` before deck, `getContext('webgl2', {alpha:true, premultipliedAlpha:false, antialias:false, depth:false})`, compile the program, upload `colour/dist/aux/flow/speed` as textures (`TEXTURE_WRAP_S/T = CLAMP_TO_EDGE`, `MIN_FILTER = NEAREST` for colour/dist, `LINEAR` for aux/flow/speed), and start the loop. Errors at any point call `fallbackToStatic(reason)`.
 
 Loop: read `viewState(deck)`; if the signature changed or time moved, render. Compute `{w,h,scale} = renderSize(cssW, cssH, dpr, renderScale)` and `cameraUniforms(vs, cssW, cssH, w, h)`. `requestAnimationFrame` is started/stopped by mode, `on`, and `document.hidden`.
 
@@ -425,11 +425,11 @@ Add to `test/sea-core.test.js`: the key set of `modeSettings('baseline').uniform
 
 - [ ] **Step 5: Render and compare with the prototype**
 
-Render the live crop at the aligned full-map camera (`tx: 1681.5, ty: 1313.1, zoom: 3.03` px/tile, which corresponds to the prototype's crop-local `tx: 1081.5, ty: 613.1, zoom: 3.03` over crop origin `(600, 700)`) and write the PNGs:
+Render the live crop at the aligned full-map camera (`tx: 1400, ty: 1200, zoom: 1` px/tile, which corresponds to the prototype's crop-local `tx: 800, ty: 500, zoom: 1` over crop origin `(600, 700)` — exactly the 1600 × 1000 crop at 1 px/tile) and write the PNGs:
 
 ```bash
 PW=/home/dev/.local/share/node-v24.22.2-linux-x64/bin/playwright-cli
-$PW -s zigzag --raw eval "() => window.__zzSea.debugRender({tx:1681.5, ty:1313.1, zoom:3.03, width:1600, height:1000})" > /tmp/opencode/live.b64
+$PW -s zigzag --raw eval "() => window.__zzSea.debugRender({tx:1400, ty:1200, zoom:1, width:1600, height:1000})" > /tmp/opencode/live.b64
 python3 - <<'PY'
 import base64
 s = open('/tmp/opencode/live.b64').read().strip().strip('"')
@@ -437,7 +437,7 @@ open('/tmp/opencode/live-baseline.png','wb').write(base64.b64decode(s.split(',',
 PY
 ```
 
-Render the prototype reference at `?variant=P&fsrc=2&t=0&tx=1081.5&ty=613.1&zoom=3.03&ui=0` (`1600 × 1000`) and save it as `/tmp/opencode/ref-baseline.png` (use the same browser; if a page screenshot hangs on fonts, use the headless-shell pattern already used in this repo's earlier checks).
+Render the prototype reference at `?variant=P&fsrc=2&t=0&tx=800&ty=500&zoom=1&ui=0` (`1600 × 1000`) and save it as `/tmp/opencode/ref-baseline.png` (use the same browser; if a page screenshot hangs on fonts, use the headless-shell pattern already used in this repo's earlier checks).
 
 Verify the three layered parity gates on water pixels (`aux[...,0] > 2`):
 1. **colour-only** (all effects disabled) vs the colour texture: `mean |diff| <= 1.0` (`~0.755` lossy-WebP floor; proves camera projection, texel snapping and sampling).
