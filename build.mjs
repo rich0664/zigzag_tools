@@ -20,7 +20,20 @@ fs.writeFileSync(path.join(root, 'dist', 'zigzag-fill.user.js'), parts.join('\n'
 console.log('built dist/zigzag-fill.user.js');
 
 // The sea-depth overlay is a separate userscript with its own header and asset.
+// The pure core, the GLSL source and the runtime share one scope: constants are
+// inlined first, then each module with its `export` markers stripped.
 const seaHeader = fs.readFileSync(path.join(root, 'src', 'sea-header.txt'), 'utf8').trimEnd();
-const seaCode = fs.readFileSync(path.join(root, 'src', 'sea.js'), 'utf8').trim();
-fs.writeFileSync(path.join(root, 'dist', 'zigzag-sea.user.js'), seaHeader + '\n\n' + seaCode + '\n');
+const seaConsts = JSON.parse(fs.readFileSync(path.join(root, 'src', 'sea-consts.json'), 'utf8'));
+const SEA_ORDER = ['sea-core.js', 'sea-glsl.js', 'sea.js'];
+const seaParts = [seaHeader, `const seaConsts = ${JSON.stringify(seaConsts)};`];
+for (const f of SEA_ORDER) {
+  let code = fs.readFileSync(path.join(root, 'src', f), 'utf8');
+  if (f === 'sea-core.js') {
+    code = code.replace(/^import seaConsts from '\.\/sea-consts\.json' with \{ type: 'json' \};\s*$/m, '');
+  }
+  code = code.replace(/^export\s*\{[^}]*\};?[^\S\r\n]*$/mg, '');
+  code = code.replace(/^export\s+/mg, '');
+  seaParts.push(`\n/* ---- ${f} ---- */\n` + code.trim());
+}
+fs.writeFileSync(path.join(root, 'dist', 'zigzag-sea.user.js'), seaParts.join('\n') + '\n');
 console.log('built dist/zigzag-sea.user.js');
