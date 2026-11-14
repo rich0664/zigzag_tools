@@ -83,10 +83,12 @@ function cameraUniforms(vs, cssW, cssH, backingW, backingH) {
   };
 }
 
-// nextAt starts at 0; without the 30 fps gate every frame draws
+// nextAt starts at 0; without the 30 fps gate every frame draws. The 1 ms
+// tolerance keeps exact 60 Hz steps (2 × 16.6667 ms) admitted: without it the
+// sum lands a hair below nextAt and the gate slips to every third frame.
 function fpsGate(now, nextAt, fps30) {
   if (!fps30) return { draw: true, nextAt };
-  const draw = now >= nextAt;
+  const draw = now >= nextAt - 1;
   return { draw, nextAt: draw ? now + 1000 / 30 : nextAt };
 }
 

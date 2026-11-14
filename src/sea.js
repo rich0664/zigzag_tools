@@ -567,11 +567,11 @@
   }
 
   // ---- menu-facing setters -------------------------------------------------
-  // Brightness arrives as the menu percentage (50..150) and is stored as the
-  // multiplier the shader and CSS use (parseState returns the same unit).
-  function setBrightness(percent) {
-    const v = Number(percent);
-    state.brightness = clamp(isFinite(v) ? v / 100 : 1, 0.5, 1.5);
+  // Brightness is the 0.5..1.5 multiplier, the same unit parseState returns and
+  // the shader/CSS use; the menu passes its percentage divided by 100.
+  function setBrightness(multiplier) {
+    const v = Number(multiplier);
+    state.brightness = clamp(isFinite(v) ? v : 1, 0.5, 1.5);
     const ov = document.getElementById(OV_ID);
     if (ov) ov.style.filter = `brightness(${state.brightness})`;
     return state.brightness;

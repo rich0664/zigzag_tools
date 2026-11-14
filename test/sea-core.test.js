@@ -241,6 +241,17 @@ describe('fpsGate', () => {
     assert.equal(due.draw, true);
     assert.ok(near(due.nextAt, 33.4 + 1000 / 30));
   });
+
+  it('admits 30 frames over 60 exact 60 Hz ticks', () => {
+    let nextAt = 0;
+    let draws = 0;
+    for (let i = 1; i <= 60; i++) {
+      const frame = fpsGate(i * (1000 / 60), nextAt, true);
+      nextAt = frame.nextAt;
+      if (frame.draw) draws++;
+    }
+    assert.ok(draws >= 29 && draws <= 31, `draws=${draws}`);
+  });
 });
 
 describe('assetUrl', () => {
