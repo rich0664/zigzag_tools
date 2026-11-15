@@ -85,19 +85,23 @@ in the shader when animated, as CSS `filter: brightness()` on `static`.
 ### Assets
 
 It loads the colour map plus, for animated modes, four baked shader textures
-(total 12.75 MB):
+(total 14.22 MB):
 
 | file | size (px) | size |
 |---|---|---:|
-| `dist/zigzag-sea.webp` | 7749 × 5254 | 2.034 MB |
+| `dist/zigzag-sea.avif` | 7749 × 5254 | 3.498 MB |
+| `dist/zigzag-sea.webp` | 7749 × 5254 | 2.034 MB (fallback only) |
 | `dist/zigzag-sea-dist.webp` | 7749 × 5254 | 3.204 MB |
 | `dist/zigzag-sea-aux.webp` | 3875 × 2627 | 6.773 MB |
 | `dist/zigzag-sea-flow.webp` | 484 × 328 | 0.187 MB |
 | `dist/zigzag-sea-speed.webp` | 1937 × 1313 | 0.555 MB |
 
-`dist.webp` is √(distance / 600), `aux.webp` is depth + the along-coast
-vector, `flow.webp` the 16-tile gyre field and `speed.webp` the baked speed
-field. All four are lossless, full-map and versioned with the userscript.
+The colour map is AVIF q95 4:4:4; `zigzag-sea.webp` (lossy q92) is fetched only
+when the browser cannot decode AVIF in an `<img>`, so a normal load never
+downloads it. `dist.webp` is √(distance / 600), `aux.webp` is depth + the
+along-coast vector, `flow.webp` the 16-tile gyre field and `speed.webp` the
+baked speed field. All four are lossless, full-map and versioned with the
+userscript.
 
 ## Texture generator
 
@@ -107,6 +111,8 @@ whole map at one pixel per tile (7749 × 5254), in a single pass:
 ```bash
 python3 tools/build_dist.py                    # once: exact distance field, ~35 s
 python3 tools/sea_full.py <preset> --single    # ~80 s, writes out/sea/full_<preset>.png
+python3 -c "from PIL import Image; \
+  Image.open('out/sea/full_<preset>.png').convert('RGB').save('dist/zigzag-sea.avif', quality=95, subsampling='4:4:4', speed=6)"
 python3 -c "from PIL import Image; \
   Image.open('out/sea/full_<preset>.png').convert('RGB').save('dist/zigzag-sea.webp', quality=92, method=6)"
 

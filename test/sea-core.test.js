@@ -353,19 +353,24 @@ describe('assetUrl', () => {
       assetUrl('zigzag-sea-dist.webp'),
       `${seaConsts.assetBase}/zigzag-sea-dist.webp?v=${seaConsts.version}`,
     );
-    assert.match(assetUrl('zigzag-sea-dist.webp'), /\?v=0\.3\.0$/);
+    assert.match(assetUrl('zigzag-sea-dist.webp'), /\?v=0\.3\.1$/);
   });
 
   it('versions every shader texture', () => {
     for (const name of ['dist', 'aux', 'flow', 'speed']) {
-      assert.match(assetUrl(`zigzag-sea-${name}.webp`), /\?v=0\.3\.0$/);
+      assert.match(assetUrl(`zigzag-sea-${name}.webp`), /\?v=0\.3\.1$/);
     }
+  });
+
+  it('versions both colour sources with the same query string', () => {
+    assert.match(assetUrl('zigzag-sea.avif'), /\?v=0\.3\.1$/);
+    assert.match(assetUrl('zigzag-sea.webp'), /\?v=0\.3\.1$/);
   });
 
   it('accepts a base override for local builds', () => {
     assert.equal(
       assetUrl('zigzag-sea-dist.webp', 'http://127.0.0.1:3006'),
-      'http://127.0.0.1:3006/zigzag-sea-dist.webp?v=0.3.0',
+      'http://127.0.0.1:3006/zigzag-sea-dist.webp?v=0.3.1',
     );
     assert.equal(
       assetUrl('zigzag-sea-dist.webp', undefined),

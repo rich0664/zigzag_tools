@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         zig~zag sea depth
 // @namespace    zigzagTools
-// @version      0.3.0
+// @version      0.3.1
 // @description  Draws a bathymetric sea between the zig-zag.fm archipelagos: depth = distance from land, terrain = layered noise, rendered tile-aligned behind the map.
 // @match        https://www.zig-zag.fm/*
 // @grant        none
@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 (() => {
-const seaConsts = {"version":"0.3.0","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":16,"shelf":26,"flow":3.12,"wave":2.5,"grain":0.03,"foam":0.25,"deep":0.6,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.046,"par":0.976,"pom":5,"dslow":0.91,"win":0.58,"wout":0.82,"cycle":7,"warp":1.6,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.187,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.187,0.426,0.594,1]}};
+const seaConsts = {"version":"0.3.1","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":16,"shelf":26,"flow":3.12,"wave":2.5,"grain":0.03,"foam":0.25,"deep":0.6,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.046,"par":0.976,"pom":5,"dslow":0.91,"win":0.58,"wout":0.82,"cycle":7,"warp":1.6,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.187,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.187,0.426,0.594,1]}};
 
 /* ---- sea-core.js ---- */
 // Pure core of the sea overlay: quality modes, saved-state parsing, screen ↔
@@ -1163,6 +1163,7 @@ function mountSeaUi(opts) {
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
     glReady: false, error: null, loading: false, moving: false,
+    colourFormat: null,            // 'avif' or 'webp', whichever decoded
     canUseShader, maxTextureSize: probe.maxTextureSize,
   };
   window.__zzSea = state;
@@ -1420,33 +1421,46 @@ function mountSeaUi(opts) {
   // The colour map is the only texture static needs. It also feeds the GL
   // colour texture, so it is decoded once; releasing it while animated keeps a
   // 40 MPx bitmap out of memory next to the GPU copy.
+  // AVIF q95 4:4:4 is the shipped colour map; the old lossy WebP stays as the
+  // fallback for any browser that cannot decode AVIF in an <img>.
+  const COLOUR_SOURCES = [
+    ['avif', 'zigzag-sea.avif'],
+    ['webp', 'zigzag-sea.webp'],
+  ];
   let colourPromise = null;
 
   function loadColour() {
     if (state.img) return Promise.resolve(state.img);
     if (colourPromise) return colourPromise;
     colourPromise = new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        colourPromise = null;
-        state.img = img;
-        state.sig = '';
-        if (staticVisible()) startStatic();
-        // A ready animated renderer already has the colour pixels in its
-        // texture; a pending static/fallback decode must not leave the bitmap
-        // resident after an animated mode resumes.
-        if (glc && glc.ready && !glc.lost && state.mode !== 'static') state.img = null;
-        resolve(img);
+      let i = 0;
+      const tryNext = () => {
+        const [format, name] = COLOUR_SOURCES[i++];
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          colourPromise = null;
+          state.colourFormat = format;
+          state.img = img;
+          state.sig = '';
+          if (staticVisible()) startStatic();
+          // A ready animated renderer already has the colour pixels in its
+          // texture; a pending static/fallback decode must not leave the bitmap
+          // resident after an animated mode resumes.
+          if (glc && glc.ready && !glc.lost && state.mode !== 'static') state.img = null;
+          resolve(img);
+        };
+        img.onerror = () => {
+          if (i < COLOUR_SOURCES.length) { tryNext(); return; }
+          colourPromise = null;
+          state.error = 'texture: colour';
+          hideNoise(0);
+          refreshUi();
+          reject(new Error(state.error));
+        };
+        img.src = url(name);
       };
-      img.onerror = () => {
-        colourPromise = null;
-        state.error = 'texture: failed to load ' + url('zigzag-sea.webp');
-        hideNoise(0);
-        refreshUi();
-        reject(new Error(state.error));
-      };
-      img.src = url('zigzag-sea.webp');
+      tryNext();
     });
     return colourPromise;
   }
@@ -2624,6 +2638,7 @@ function mountSeaUi(opts) {
         moving: false,
         intro: { ...liveRamps(performance.now()) },
         mapStatus: mapStatus(),
+        colourFormat: state.colourFormat,
       };
     }
     return {
@@ -2637,6 +2652,7 @@ function mountSeaUi(opts) {
       moving: !!state.moving,
       intro: { ...liveRamps(performance.now()) },
       mapStatus: mapStatus(),
+      colourFormat: state.colourFormat,
     };
   }
 

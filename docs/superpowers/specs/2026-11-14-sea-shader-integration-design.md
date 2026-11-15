@@ -156,11 +156,16 @@ the current texture and versioned in the same way.
 
 | file | size (px) | channels | contents |
 |---|---|---|---|
-| `zigzag-sea.webp` | 7749 × 5254 | RGB | colour map (exists, unchanged) |
+| `zigzag-sea.avif` | 7749 × 5254 | RGB | colour map, AVIF q95 4:4:4 (3.5 MB, max error 13/255, p99 3) |
+| `zigzag-sea.webp` | 7749 × 5254 | RGB | colour map fallback, lossy q92 (2.03 MB), fetched only when AVIF cannot decode |
 | `zigzag-sea-dist.webp` | 7749 × 5254 | R | **√(distance / 600), clamped, zeroed on land/holes**, lossless |
 | `zigzag-sea-aux.webp` | 3875 × 2627 | RGB | R depth (1 − height, zeroed on land/holes), G/B along-coast vector, A = 255, lossless |
 | `zigzag-sea-flow.webp` | 484 × 328 | RG | 16-tile gyre u/v (the prototype's `flow.png`) |
 | `zigzag-sea-speed.webp` | 1937 × 1313 | R | baked speed field (4 tiles/texel), lossless |
+
+The colour map moved from lossy WebP 4:2:0 to AVIF q95 4:4:4: the old encoding
+was the source of the visible chroma loss along the coast, where saturated
+shallow water sits next to land.
 
 Rationale for splitting the prototype's single `aux`:
 

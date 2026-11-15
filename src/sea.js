@@ -74,6 +74,7 @@
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
     glReady: false, error: null, loading: false, moving: false,
+    colourFormat: null,            // 'avif' or 'webp', whichever decoded
     canUseShader, maxTextureSize: probe.maxTextureSize,
   };
   window.__zzSea = state;
@@ -331,33 +332,46 @@
   // The colour map is the only texture static needs. It also feeds the GL
   // colour texture, so it is decoded once; releasing it while animated keeps a
   // 40 MPx bitmap out of memory next to the GPU copy.
+  // AVIF q95 4:4:4 is the shipped colour map; the old lossy WebP stays as the
+  // fallback for any browser that cannot decode AVIF in an <img>.
+  const COLOUR_SOURCES = [
+    ['avif', 'zigzag-sea.avif'],
+    ['webp', 'zigzag-sea.webp'],
+  ];
   let colourPromise = null;
 
   function loadColour() {
     if (state.img) return Promise.resolve(state.img);
     if (colourPromise) return colourPromise;
     colourPromise = new Promise((resolve, reject) => {
-      const img = new Image();
-      img.crossOrigin = 'anonymous';
-      img.onload = () => {
-        colourPromise = null;
-        state.img = img;
-        state.sig = '';
-        if (staticVisible()) startStatic();
-        // A ready animated renderer already has the colour pixels in its
-        // texture; a pending static/fallback decode must not leave the bitmap
-        // resident after an animated mode resumes.
-        if (glc && glc.ready && !glc.lost && state.mode !== 'static') state.img = null;
-        resolve(img);
+      let i = 0;
+      const tryNext = () => {
+        const [format, name] = COLOUR_SOURCES[i++];
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = () => {
+          colourPromise = null;
+          state.colourFormat = format;
+          state.img = img;
+          state.sig = '';
+          if (staticVisible()) startStatic();
+          // A ready animated renderer already has the colour pixels in its
+          // texture; a pending static/fallback decode must not leave the bitmap
+          // resident after an animated mode resumes.
+          if (glc && glc.ready && !glc.lost && state.mode !== 'static') state.img = null;
+          resolve(img);
+        };
+        img.onerror = () => {
+          if (i < COLOUR_SOURCES.length) { tryNext(); return; }
+          colourPromise = null;
+          state.error = 'texture: colour';
+          hideNoise(0);
+          refreshUi();
+          reject(new Error(state.error));
+        };
+        img.src = url(name);
       };
-      img.onerror = () => {
-        colourPromise = null;
-        state.error = 'texture: failed to load ' + url('zigzag-sea.webp');
-        hideNoise(0);
-        refreshUi();
-        reject(new Error(state.error));
-      };
-      img.src = url('zigzag-sea.webp');
+      tryNext();
     });
     return colourPromise;
   }
@@ -1535,6 +1549,7 @@
         moving: false,
         intro: { ...liveRamps(performance.now()) },
         mapStatus: mapStatus(),
+        colourFormat: state.colourFormat,
       };
     }
     return {
@@ -1548,6 +1563,7 @@
       moving: !!state.moving,
       intro: { ...liveRamps(performance.now()) },
       mapStatus: mapStatus(),
+      colourFormat: state.colourFormat,
     };
   }
 
