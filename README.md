@@ -35,9 +35,9 @@ canvas and follows pan and zoom, one texel per map tile.
 
 ## Use
 
-Open the exploration map. A **≈** button appears directly under the header's
-notifications button; click it for the sea settings panel (outside click or
-`Escape` closes it). To toggle it from the console:
+Open the exploration map. A pixel-wave button appears directly under the
+header's notifications button; click it for the sea settings panel (outside
+click or `Escape` closes it). To toggle it from the console:
 
 ```js
 window.__zzSea.setOn(false)      // off
@@ -46,13 +46,14 @@ window.__zzSea.setMode('low')    // quality mode, see the ids below
 window.__zzSea.on                // current state; read it, use setOn to change it
 ```
 
-`setMode` takes `baseline`, `medium`, `low`, `extra-low` or `static`.
+`setMode` takes `baseline` (shown as **fancy** in the menu), `medium`, `low`,
+`extra-low` or `static`.
 
-The panel holds, in order: sea on/off; quality; opacity (0–100); brightness
-(50–150%); and a **30 fps limit** toggle. Every choice is remembered in
-`localStorage`. A diagnostics block at the bottom shows the texture VRAM
-estimate (the decoded image in `static`), fps, CPU ms per frame and the GPU
-renderer, with a **bench** button; it only polls while the panel is open, and
+The panel holds, in order: sea on/off; quality; a **30 fps limit** toggle;
+opacity (0–100); brightness (50–150%); then the diagnostics block with its
+**bench** button. Every choice is remembered in `localStorage`. The block shows
+the texture VRAM estimate (the decoded image in `static`), fps, CPU ms per
+frame and the GPU renderer; it only polls while the panel is open, and
 `window.__zzSea.stats()` returns the same numbers.
 
 ### Quality modes
@@ -62,18 +63,18 @@ work removed.
 
 | mode | what it removes |
 |---|---|
-| `baseline` | nothing — LOD flow, two open-water noise layers, parallax/POM, depth-biased warp |
+| `baseline` (**fancy**) | nothing — LOD flow, two open-water noise layers, parallax/POM, depth-biased warp |
 | `medium` | parallax/POM (`par 0`, `pom 1`) |
 | `low` | also the warp, the analytic bend and the second noise layer: coarse 16-tile gyre only, and open-water grain `0.03 → 0.04` because there is no warp |
 | `extra low` | same as `low`, rendered at half the backing-store resolution |
 | `static` | the shader entirely: the colour map blitted by the 2D path, one draw per camera change |
 
 `static` is the fallback when WebGL2 is missing or the GPU's texture limit is
-below 8192 px. With nothing saved the mode is `baseline` on a desktop browser
-and `static` on a coarse-pointer (phone/tablet) or narrow viewport; a saved
-mode always wins. Phones are not a performance target for this version. The
-animated textures are loaded lazily on the first animated switch; `static`
-never fetches them.
+below 8192 px. With nothing saved the mode is `baseline` (**fancy**) on a
+desktop browser and `static` on a coarse-pointer (phone/tablet) or narrow
+viewport; a saved mode always wins. Phones are not a performance target for
+this version. The animated textures are loaded lazily on the first animated
+switch; `static` never fetches them.
 
 The **30 fps limit** caps only the animated modes (it is off by default and
 does nothing on `static`). Opacity fades the whole overlay; brightness

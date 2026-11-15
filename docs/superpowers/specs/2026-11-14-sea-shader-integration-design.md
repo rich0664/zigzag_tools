@@ -31,7 +31,8 @@ the game's own HUD instead of a floating debug slider.
   2-tile and 1-tile baked LOD textures are a later experiment, not shipped.
 - **Static** is literally the main map texture, blitted as today — not the
   shader with time frozen.
-- Five entries in the menu: `baseline`, `medium`, `low`, `extra low`, `static`.
+- Five entries in the menu: **fancy** (id: `baseline`), `medium`, `low`,
+  `extra low`, `static`.
 - The old bottom-right slider goes away. In its place, a button **under the
   notifications button** at the top right of the map, opening a small menu with
   the quality modes, opacity, brightness and a 30 fps toggle.
@@ -290,19 +291,27 @@ Button and menu:
 - A 30 × 30 button, same right alignment as notifications, transparent
   background, HUD font/colour copied from the notifications button's computed
   style at mount (the app's Tailwind classes are purged, so do not rely on
-  using them). Label appears on hover like the notifications label does.
+  using them). Its icon is a 16 × 16 pixel-art wave drawn as crisp SVG blocks;
+  the `sea` label appears on hover like the notifications label does.
 - Click toggles the menu; outside click and `Escape` close it; focus stays in
   the document's normal order.
 - Menu contents, in order:
   1. `sea on / off`
-  2. quality: `baseline · medium · low · extra low · static` (disabled entries
-     explained when the shader cannot run; the current one marked)
-  3. opacity (0–100)
-  4. brightness (50–150%, default 100)
-  5. `30 fps limit` toggle (off by default)
-- The menu is styled as a dark translucent panel with a thin border, matching
-  the footer and settings surfaces. It opens downward, left-aligned to the
-  button's right edge, and flips above if it would cross the viewport bottom.
+  2. quality: **fancy** (id: `baseline`) · `medium` · `low` · `extra low` ·
+     `static` (disabled entries explained when the shader cannot run; the
+     current one marked)
+  3. `30 fps limit` toggle (off by default)
+  4. a 2 px block rule
+  5. opacity (0–100)
+  6. brightness (50–150%, default 100)
+  7. a 2 px block rule
+  8. the diagnostics block (status/retry, VRAM/fps/ms, renderer) and its
+     **bench** button
+- The menu is a pixel HUD surface: the app's Dico stack on the panel and on
+  every native control, square corners, no fine borders or shadows, a flat
+  near-black panel, and texelly 10 px checkboxes/radios and 4 px slider tracks.
+  It opens downward, left-aligned to the button's right edge, and flips above
+  if it would cross the viewport bottom.
 - No layout shift: the button is fixed, and the map's own HUD is untouched.
 
 Persistence (`localStorage`): `zz-sea-mode`, `zz-sea-on`, `zz-sea-opacity`

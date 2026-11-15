@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { seaUiPlacement } from '../src/sea-ui.js';
+import { seaUiPlacement, SEA_UI_MODE_LABELS } from '../src/sea-ui.js';
 
 // The menu is positioned from the notifications button's live rect: same right
 // edge, six px under its bottom, flipped above when it would cross the bottom.
@@ -29,5 +29,17 @@ describe('sea ui placement', () => {
     // 50 + 30 + 6 + 214 = 300
     const p = seaUiPlacement({ right: 938, bottom: 44 }, { width: 1280, height: 300 }, 214);
     assert.equal(p.flipped, false);
+  });
+});
+
+describe('sea ui mode labels', () => {
+  it('shows baseline as fancy but keeps the stored id', () => {
+    assert.deepEqual(SEA_UI_MODE_LABELS, {
+      baseline: 'fancy',
+      medium: 'medium',
+      low: 'low',
+      'extra-low': 'extra low',
+      static: 'static',
+    });
   });
 });
