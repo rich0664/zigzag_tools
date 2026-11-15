@@ -1218,6 +1218,31 @@ function mountSeaUi(opts) {
     return null;
   }
 
+  // The app's splash ("Navigating to the exploration archipelagos") covers the
+  // map until its layer store says ready, and MapCanvas carries that state as
+  // props: {status, layers, viewState}. The intro must not run underneath it.
+  // The fiber is found once per canvas; its memoizedProps are the live props.
+  let mapFiber = null;
+  let mapFiberCanvas = null;
+  function mapStatus() {
+    const canvas = deckCanvas();
+    if (!canvas) return null;
+    if (mapFiberCanvas !== canvas) { mapFiberCanvas = canvas; mapFiber = null; }
+    const usable = f => !!(f && f.memoizedProps && 'status' in f.memoizedProps);
+    if (!usable(mapFiber)) {
+      mapFiber = null;
+      const key = Object.keys(canvas).find(k => k.startsWith('__reactFiber'));
+      if (!key) return null;
+      for (let f = canvas[key]; f; f = f.return) {
+        const p = f.memoizedProps;
+        if (p && 'status' in p && 'layers' in p && 'viewState' in p) { mapFiber = f; break; }
+      }
+    }
+    if (!mapFiber) return null;
+    const s = mapFiber.memoizedProps.status;
+    return s === undefined ? null : s;
+  }
+
   // The controller updates deck.viewManager.viewState synchronously, while the
   // app's React state (the viewState prop) commits a frame or more later.
   // Reading the prop made the sea trail the map while panning, so the live
@@ -1447,6 +1472,7 @@ function mountSeaUi(opts) {
   // The intro ramps run once per fresh build that showed the noise. The debug
   // hook can pin them for deterministic sampling.
   const NEUTRAL_RAMPS = { reveal: 1, wave: 1, grain: 1, flow: 1 };
+  const ZERO_RAMPS = { reveal: 0, wave: 0, grain: 0, flow: 0 };
   const INTRO_REVEAL_MS = 1600;
   const INTRO_WAVE_START_MS = 1500;
   const INTRO_WAVE_MS = 1400;
@@ -1472,6 +1498,14 @@ function mountSeaUi(opts) {
     introStart = 0;
     introPending = true;
     introNoiseHidden = false;
+  }
+
+  // The ramps actually in effect. A pending intro has not started: zero until
+  // its first frame (the app's splash may still be up), and the noise is kept.
+  function liveRamps(now) {
+    if (introOverride) return introOverride;
+    if (introPending) return ZERO_RAMPS;
+    return introRamps(now);
   }
 
   function stopIntro() {
@@ -2127,8 +2161,17 @@ function mountSeaUi(opts) {
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
     const target = seaTarget(vs);
     const now = performance.now();
-    if (introPending) { introPending = false; introStart = now; }
-    const ramps = introRamps(now);
+    // The intro waits for the app's splash to lift: until the layer status is
+    // ready (or unknown, as a fallback) the ramps stay at 0 and the noise stays
+    // up, so the reveal is not spent behind the splash.
+    if (introPending) {
+      const status = mapStatus();
+      if (status === null || status === 'ready') {
+        introPending = false;
+        introStart = now;
+      }
+    }
+    const ramps = liveRamps(now);
     const t0 = now;
     renderFrame(glc, w, h, {
       tx: target[0], ty: target[1],
@@ -2458,7 +2501,7 @@ function mountSeaUi(opts) {
         tx, ty,
         zoom: zoom * scale, zoomCss: zoom,
         centerX: bw / 2, centerY: bh / 2,
-      }, t, settings, introRamps(performance.now()));
+      }, t, settings, liveRamps(performance.now()));
 
       const px = new Uint8Array(bw * bh * 4);
       glc.gl.readPixels(0, 0, bw, bh, glc.gl.RGBA, glc.gl.UNSIGNED_BYTE, px);
@@ -2531,12 +2574,12 @@ function mountSeaUi(opts) {
         // Warm up, then wait for the GPU so the clock measures work instead of
         // command submission.
         renderFrame(glc, sized.w, sized.h, frame, start / 1000, settings,
-          introRamps(start));
+          liveRamps(start));
         syncGL(glc.gl);
         const t0 = performance.now();
         for (let i = 0; i < 60; i++) {
           renderFrame(glc, sized.w, sized.h, frame, start / 1000 + i / 60, settings,
-            introRamps(start));
+            liveRamps(start));
         }
         syncGL(glc.gl);
         ms = performance.now() - t0;
@@ -2579,7 +2622,8 @@ function mountSeaUi(opts) {
         renderer: '2D',
         draws: state.draws,
         moving: false,
-        intro: { ...introRamps(performance.now()) },
+        intro: { ...liveRamps(performance.now()) },
+        mapStatus: mapStatus(),
       };
     }
     return {
@@ -2591,7 +2635,8 @@ function mountSeaUi(opts) {
       renderer: shortRenderer(rendererName),
       draws: state.draws,
       moving: !!state.moving,
-      intro: { ...introRamps(performance.now()) },
+      intro: { ...liveRamps(performance.now()) },
+      mapStatus: mapStatus(),
     };
   }
 
