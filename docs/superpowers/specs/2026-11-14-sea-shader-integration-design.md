@@ -35,7 +35,8 @@ the game's own HUD instead of a floating debug slider.
   `extra low`, `static`.
 - The old bottom-right slider goes away. In its place, a button **under the
   notifications button** at the top right of the map, opening a small menu with
-  the quality modes, opacity, brightness and a 30 fps toggle.
+  the quality modes, opacity, brightness and an adaptive fps toggle (30 fps
+  while idle, unlimited while panning or zooming).
 - One asset set for all modes for now. Splitting it by mode is a later
   decision. Phones are not a target for this version; tiling the textures is
   the later path to them.
@@ -129,10 +130,13 @@ need the map split into tiles, which is later work.
 
 ### Frame limit
 
-A `30 fps` toggle in the menu caps the animated modes at 30 frames per second
-(time-gated in the rAF loop, so it behaves the same on 60 and 120 Hz displays);
-it is off by default and remembered. `static` is unaffected — it does not
-animate at all.
+An **adaptive fps** toggle in the menu caps the animated modes at 30 frames per
+second while the camera is still and lifts the cap while it is moving (a pan or
+a zoom), so a drag stays smooth and an idle map costs half the frames. The gate
+compares the live controller view state (target, zoom, side padding) against
+the last drawn frame, so wheel zoom counts as movement too. It is off by
+default and remembered under the existing `zz-sea-fps` key. `static` is
+unaffected — it does not animate at all.
 
 ### Default mode
 
@@ -256,8 +260,9 @@ its 0.5 after the cap.
   sampled as a 3875 × 2627 2-tile grid over the 7749 × 5254 map). No other
   GLSL logic changes.
 - Animation: rAF loop only while mode is animated, `on` is true, the document
-  is visible, and the camera/texture state is ready; the 30 fps toggle
-  time-gates it. `static` draws on camera changes only.
+  is visible, and the camera/texture state is ready; the adaptive fps toggle
+  time-gates still frames to 30 fps and lets every frame through while the
+  camera moves. `static` draws on camera changes only.
 - Upload: each texture is uploaded once. `aux`/`dist`/`flow`/`speed` are
   decoded through `createImageBitmap` so the main thread is not blocked by a
   40 MPx decode where the browser supports it.
@@ -300,7 +305,8 @@ Button and menu:
   2. quality: **fancy** (id: `baseline`) · `medium` · `low` · `extra low` ·
      `static` (disabled entries explained when the shader cannot run; the
      current one marked)
-  3. `30 fps limit` toggle (off by default)
+  3. `adaptive fps` toggle (off by default; 30 while still, unlimited while
+     moving)
   4. a 2 px block rule
   5. opacity (0–100)
   6. brightness (50–150%, default 100)
@@ -346,8 +352,9 @@ Unit (`node --test`):
   defaults
 - camera maths round-trips: a map tile at the view centre maps to the canvas
   centre at the current zoom, including deck's padding offset
-- the 30 fps gate admits a frame every 33.3 ms on both a 60 Hz and a 120 Hz
-  clock, and never on consecutive ticks
+- the adaptive fps gate draws every frame while the camera moves, admits a
+  frame every 33.3 ms while it is still on both a 60 Hz and a 120 Hz clock,
+  and never draws on consecutive still ticks
 - asset URLs carry the script version
 
 Live, in the logged-in profile with `playwright-cli`:
@@ -386,8 +393,9 @@ Live, in the logged-in profile with `playwright-cli`:
 
 Performance acceptance is on the owner's machine, not headless SwiftShader:
 baseline holds 60 fps with a 2560 × 1440 backing store at typical map zoom;
-extra low holds it where baseline cannot; the 30 fps toggle holds 30 on a 60 Hz
-display; static costs nothing while the camera is still.
+extra low holds it where baseline cannot; the adaptive fps toggle holds 30 while
+the camera is still and lifts the cap while panning or zooming; static costs
+nothing while the camera is still.
 `window.__zzSea.bench()` times 60 frames per mode for this.
 
 Phones are outside the acceptance set for this version: they default to
@@ -406,7 +414,8 @@ to making them work.
 
 ## Open items for the owner
 
-None blocking — phones, the 30 fps toggle and tiling were settled in review.
+None blocking — phones, the adaptive fps toggle and tiling were settled in
+review.
 
 Three calls the builder made, for review: brightness is a multiplier with a
 50–150% range; the coarse-pointer default is `static` for this version; and the

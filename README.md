@@ -49,7 +49,7 @@ window.__zzSea.on                // current state; read it, use setOn to change 
 `setMode` takes `baseline` (shown as **fancy** in the menu), `medium`, `low`,
 `extra-low` or `static`.
 
-The panel holds, in order: sea on/off; quality; a **30 fps limit** toggle;
+The panel holds, in order: sea on/off; quality; an **adaptive fps** toggle;
 opacity (0–100); brightness (50–150%); then the diagnostics block with its
 **bench** button. Every choice is remembered in `localStorage`. The block shows
 the texture VRAM estimate (the decoded image in `static`), fps, CPU ms per
@@ -76,10 +76,11 @@ viewport; a saved mode always wins. Phones are not a performance target for
 this version. The animated textures are loaded lazily on the first animated
 switch; `static` never fetches them.
 
-The **30 fps limit** caps only the animated modes (it is off by default and
-does nothing on `static`). Opacity fades the whole overlay; brightness
-multiplies the colour — in the shader when animated, as CSS
-`filter: brightness()` on `static`.
+The **adaptive fps** toggle caps only the animated modes: 30 fps while the
+camera is still, unlimited while it is panning or zooming. It is off by
+default, remembered under the existing `zz-sea-fps` key, and does nothing on
+`static`. Opacity fades the whole overlay; brightness multiplies the colour —
+in the shader when animated, as CSS `filter: brightness()` on `static`.
 
 ### Assets
 

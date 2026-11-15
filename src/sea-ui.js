@@ -2,7 +2,7 @@
  *
  * A 30 px button under the notifications button (same right edge) opens a dark
  * panel with the sea on/off switch, the five quality ids, opacity, brightness
- * and the 30 fps limit. The menu owns no state: it paints getState() and
+ * and the adaptive fps limit. The menu owns no state: it paints getState() and
  * reports every change through onChange(patch). The runtime in sea.js applies
  * the change, persists it and returns the state to paint.
  *
@@ -311,7 +311,7 @@ function mountSeaUi(opts) {
     fpsBox.type = 'checkbox';
     fpsBox.style.margin = '0';
     fpsBox.style.fontFamily = 'inherit';
-    const fpsRow = row(fpsBox, '30 fps limit');
+    const fpsRow = row(fpsBox, 'adaptive fps');
     fpsRow.style.marginBottom = '0';
 
     const status = document.createElement('div');
@@ -386,7 +386,7 @@ function mountSeaUi(opts) {
       diagLine2.textContent = '';
     });
 
-    // Pixel HUD order: on/off, quality, 30 fps, rule, opacity, brightness,
+    // Pixel HUD order: on/off, quality, adaptive fps, rule, opacity, brightness,
     // rule, diagnostics + bench.
     menu.append(
       onRow, quality, fpsRow, divider(),

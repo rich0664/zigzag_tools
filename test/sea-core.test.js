@@ -307,30 +307,39 @@ describe('vramBytes', () => {
 });
 
 describe('fpsGate', () => {
-  it('draws every frame without the gate', () => {
-    assert.equal(fpsGate(0, 0, false).draw, true);
-    assert.equal(fpsGate(100, 200, false).draw, true);
+  it('draws every frame without the adaptive gate', () => {
+    assert.equal(fpsGate(0, 0, false, false).draw, true);
+    assert.equal(fpsGate(100, 200, false, true).draw, true);
   });
 
-  it('admits one frame per 33.3 ms with the gate', () => {
-    const first = fpsGate(0, 0, true);
+  it('draws every frame while the camera moves', () => {
+    const moving = fpsGate(16.7, 500, true, true);
+    assert.equal(moving.draw, true);
+    assert.equal(moving.nextAt, 0);
+    const again = fpsGate(16.8, moving.nextAt, true, true);
+    assert.equal(again.draw, true);
+    assert.equal(again.nextAt, 0);
+  });
+
+  it('admits one frame per 33.3 ms with the gate while still', () => {
+    const first = fpsGate(0, 0, true, false);
     assert.equal(first.draw, true);
     assert.ok(near(first.nextAt, 1000 / 30));
 
-    const early = fpsGate(16.7, first.nextAt, true);
+    const early = fpsGate(16.7, first.nextAt, true, false);
     assert.equal(early.draw, false);
     assert.equal(early.nextAt, first.nextAt);
 
-    const due = fpsGate(33.4, first.nextAt, true);
+    const due = fpsGate(33.4, first.nextAt, true, false);
     assert.equal(due.draw, true);
     assert.ok(near(due.nextAt, 33.4 + 1000 / 30));
   });
 
-  it('admits 30 frames over 60 exact 60 Hz ticks', () => {
+  it('admits 30 frames over 60 exact 60 Hz still ticks', () => {
     let nextAt = 0;
     let draws = 0;
     for (let i = 1; i <= 60; i++) {
-      const frame = fpsGate(i * (1000 / 60), nextAt, true);
+      const frame = fpsGate(i * (1000 / 60), nextAt, true, false);
       nextAt = frame.nextAt;
       if (frame.draw) draws++;
     }

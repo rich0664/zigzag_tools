@@ -129,11 +129,13 @@ function cameraUniforms(vs, cssW, cssH, backingW, backingH) {
   };
 }
 
-// nextAt starts at 0; without the 30 fps gate every frame draws. The 1 ms
-// tolerance keeps exact 60 Hz steps (2 × 16.6667 ms) admitted: without it the
-// sum lands a hair below nextAt and the gate slips to every third frame.
-function fpsGate(now, nextAt, fps30) {
-  if (!fps30) return { draw: true, nextAt };
+// nextAt starts at 0; without the adaptive gate every frame draws. While the
+// camera moves the gate is open (and resets nextAt, so the first still frame
+// draws immediately); while it is still the 1 ms tolerance keeps exact 60 Hz
+// steps (2 × 16.6667 ms) admitted instead of slipping to every third frame.
+function fpsGate(now, nextAt, adaptive, moving) {
+  if (!adaptive) return { draw: true, nextAt };
+  if (moving) return { draw: true, nextAt: 0 };
   const draw = now >= nextAt - 1;
   return { draw, nextAt: draw ? now + 1000 / 30 : nextAt };
 }
@@ -513,7 +515,7 @@ void main() {
  *
  * A 30 px button under the notifications button (same right edge) opens a dark
  * panel with the sea on/off switch, the five quality ids, opacity, brightness
- * and the 30 fps limit. The menu owns no state: it paints getState() and
+ * and the adaptive fps limit. The menu owns no state: it paints getState() and
  * reports every change through onChange(patch). The runtime in sea.js applies
  * the change, persists it and returns the state to paint.
  *
@@ -822,7 +824,7 @@ function mountSeaUi(opts) {
     fpsBox.type = 'checkbox';
     fpsBox.style.margin = '0';
     fpsBox.style.fontFamily = 'inherit';
-    const fpsRow = row(fpsBox, '30 fps limit');
+    const fpsRow = row(fpsBox, 'adaptive fps');
     fpsRow.style.marginBottom = '0';
 
     const status = document.createElement('div');
@@ -897,7 +899,7 @@ function mountSeaUi(opts) {
       diagLine2.textContent = '';
     });
 
-    // Pixel HUD order: on/off, quality, 30 fps, rule, opacity, brightness,
+    // Pixel HUD order: on/off, quality, adaptive fps, rule, opacity, brightness,
     // rule, diagnostics + bench.
     menu.append(
       onRow, quality, fpsRow, divider(),
@@ -1159,7 +1161,7 @@ function mountSeaUi(opts) {
     mode: 'static',                // the live mode; the saved one is applied when ready
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
-    glReady: false, error: null, loading: false,
+    glReady: false, error: null, loading: false, moving: false,
     canUseShader, maxTextureSize: probe.maxTextureSize,
   };
   window.__zzSea = state;
@@ -1411,6 +1413,14 @@ function mountSeaUi(opts) {
 
   let glc = null;
   let nextAt = 0;                 // fps gate clock, ms; 0 admits the first frame
+  let lastDrawnSig = null;        // live view of the last drawn frame
+
+  // The camera fields that make the map move: target, zoom and the side
+  // padding. Any change (drag, wheel, controller) opens the adaptive gate.
+  function viewSig(vs) {
+    const pad = vs.padding || {};
+    return [vs.target[0], vs.target[1], vs.zoom, pad.left || 0, pad.right || 0].join('|');
+  }
 
   // ---- diagnostics ---------------------------------------------------------
   // Rings of the last 60 rendered GL frames: the CPU time around renderFrame
@@ -1773,6 +1783,7 @@ function mountSeaUi(opts) {
     if (!glc) return;
     const c = glc;
     glc = null;
+    lastDrawnSig = null;
     if (c.raf) cancelAnimationFrame(c.raf);
     state.glReady = false;
     if (c.canvas) {
@@ -1886,6 +1897,7 @@ function mountSeaUi(opts) {
     }, t, settings);
     pushRing(frameMs, performance.now() - t0);
     state.draws++;
+    lastDrawnSig = viewSig(vs);
 
     // The first real frame means the 2D canvas can go: the opaque-enough water
     // is already in the drawing buffer, so removing it cannot show a blank.
@@ -1906,8 +1918,14 @@ function mountSeaUi(opts) {
     glc.raf = 0;
     if (glc.lost || state.mode === 'static' || !state.on || document.hidden) return;
     try {
-      // the loop still runs every rAF; the gate decides which frames draw
-      const gate = fpsGate(now, nextAt, state.fps30);
+      // The loop still runs every rAF; the adaptive gate decides which frames
+      // draw. Movement is measured against the last *drawn* camera, so skipped
+      // still frames cannot hide a pan.
+      const deck = deckCanvas();
+      const vs = deck && viewState(deck);
+      const sig = vs ? viewSig(vs) : null;
+      state.moving = !!sig && lastDrawnSig !== null && sig !== lastDrawnSig;
+      const gate = fpsGate(now, nextAt, state.fps30, state.moving);
       nextAt = gate.nextAt;
       if (gate.draw) {
         if (lastFrameAt) pushRing(frameGaps, now - lastFrameAt);
@@ -2309,6 +2327,7 @@ function mountSeaUi(opts) {
         msKind: 'cpu',
         renderer: '2D',
         draws: state.draws,
+        moving: false,
       };
     }
     return {
@@ -2319,6 +2338,7 @@ function mountSeaUi(opts) {
       msKind: 'cpu',
       renderer: shortRenderer(rendererName),
       draws: state.draws,
+      moving: !!state.moving,
     };
   }
 
@@ -2349,11 +2369,17 @@ function mountSeaUi(opts) {
     return state.opacity;
   }
 
-  function setFps30(on) {
+  // Adaptive fps: 30 while the camera is still, unlimited while it moves. The
+  // state field and storage key stay `fps30` / `zz-sea-fps` for compatibility.
+  function setAdaptiveFps(on) {
     state.fps30 = !!on;
     nextAt = 0;                    // the next rAF draws immediately
     refreshUi();
     return state.fps30;
+  }
+
+  function setFps30(on) {
+    return setAdaptiveFps(on);
   }
 
   // Toggling the sea off stops both loops and hides the live canvas; toggling
@@ -2391,6 +2417,7 @@ function mountSeaUi(opts) {
   state.bench = bench;
   state.retry = retry;
   state.setFps30 = setFps30;
+  state.setAdaptiveFps = setAdaptiveFps;
   state.setBrightness = setBrightness;
   state.setOpacity = setOpacity;
   state.setOn = setOn;
@@ -2427,7 +2454,7 @@ function mountSeaUi(opts) {
       localStorage.setItem('zz-sea-brightness', String(Math.round(v * 100)));
     }
     if ('fps30' in patch) {
-      localStorage.setItem('zz-sea-fps', setFps30(patch.fps30) ? '1' : '0');
+      localStorage.setItem('zz-sea-fps', setAdaptiveFps(patch.fps30) ? '1' : '0');
     }
     return uiState();
   }

@@ -73,7 +73,7 @@
     mode: 'static',                // the live mode; the saved one is applied when ready
     img: null, raf: 0, sig: '', draws: 0,
     opacity: saved.opacity, brightness: saved.brightness, fps30: saved.fps30,
-    glReady: false, error: null, loading: false,
+    glReady: false, error: null, loading: false, moving: false,
     canUseShader, maxTextureSize: probe.maxTextureSize,
   };
   window.__zzSea = state;
@@ -325,6 +325,14 @@
 
   let glc = null;
   let nextAt = 0;                 // fps gate clock, ms; 0 admits the first frame
+  let lastDrawnSig = null;        // live view of the last drawn frame
+
+  // The camera fields that make the map move: target, zoom and the side
+  // padding. Any change (drag, wheel, controller) opens the adaptive gate.
+  function viewSig(vs) {
+    const pad = vs.padding || {};
+    return [vs.target[0], vs.target[1], vs.zoom, pad.left || 0, pad.right || 0].join('|');
+  }
 
   // ---- diagnostics ---------------------------------------------------------
   // Rings of the last 60 rendered GL frames: the CPU time around renderFrame
@@ -687,6 +695,7 @@
     if (!glc) return;
     const c = glc;
     glc = null;
+    lastDrawnSig = null;
     if (c.raf) cancelAnimationFrame(c.raf);
     state.glReady = false;
     if (c.canvas) {
@@ -800,6 +809,7 @@
     }, t, settings);
     pushRing(frameMs, performance.now() - t0);
     state.draws++;
+    lastDrawnSig = viewSig(vs);
 
     // The first real frame means the 2D canvas can go: the opaque-enough water
     // is already in the drawing buffer, so removing it cannot show a blank.
@@ -820,8 +830,14 @@
     glc.raf = 0;
     if (glc.lost || state.mode === 'static' || !state.on || document.hidden) return;
     try {
-      // the loop still runs every rAF; the gate decides which frames draw
-      const gate = fpsGate(now, nextAt, state.fps30);
+      // The loop still runs every rAF; the adaptive gate decides which frames
+      // draw. Movement is measured against the last *drawn* camera, so skipped
+      // still frames cannot hide a pan.
+      const deck = deckCanvas();
+      const vs = deck && viewState(deck);
+      const sig = vs ? viewSig(vs) : null;
+      state.moving = !!sig && lastDrawnSig !== null && sig !== lastDrawnSig;
+      const gate = fpsGate(now, nextAt, state.fps30, state.moving);
       nextAt = gate.nextAt;
       if (gate.draw) {
         if (lastFrameAt) pushRing(frameGaps, now - lastFrameAt);
@@ -1223,6 +1239,7 @@
         msKind: 'cpu',
         renderer: '2D',
         draws: state.draws,
+        moving: false,
       };
     }
     return {
@@ -1233,6 +1250,7 @@
       msKind: 'cpu',
       renderer: shortRenderer(rendererName),
       draws: state.draws,
+      moving: !!state.moving,
     };
   }
 
@@ -1263,11 +1281,17 @@
     return state.opacity;
   }
 
-  function setFps30(on) {
+  // Adaptive fps: 30 while the camera is still, unlimited while it moves. The
+  // state field and storage key stay `fps30` / `zz-sea-fps` for compatibility.
+  function setAdaptiveFps(on) {
     state.fps30 = !!on;
     nextAt = 0;                    // the next rAF draws immediately
     refreshUi();
     return state.fps30;
+  }
+
+  function setFps30(on) {
+    return setAdaptiveFps(on);
   }
 
   // Toggling the sea off stops both loops and hides the live canvas; toggling
@@ -1305,6 +1329,7 @@
   state.bench = bench;
   state.retry = retry;
   state.setFps30 = setFps30;
+  state.setAdaptiveFps = setAdaptiveFps;
   state.setBrightness = setBrightness;
   state.setOpacity = setOpacity;
   state.setOn = setOn;
@@ -1341,7 +1366,7 @@
       localStorage.setItem('zz-sea-brightness', String(Math.round(v * 100)));
     }
     if ('fps30' in patch) {
-      localStorage.setItem('zz-sea-fps', setFps30(patch.fps30) ? '1' : '0');
+      localStorage.setItem('zz-sea-fps', setAdaptiveFps(patch.fps30) ? '1' : '0');
     }
     return uiState();
   }
