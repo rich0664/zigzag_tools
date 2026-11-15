@@ -177,6 +177,17 @@ uniform float uSpeedA, uSpeedB, uScaleA, uScaleB;
 uniform float uParallax, uDeepSlow, uWaveIn, uWaveOut, uPomLayers;
 uniform float uAlongScale, uBrightness, uNoiseLayers;
 
+// ---- map border -------------------------------------------------------------
+// Everything here is in map texels (one texel per cell), so the trim scales
+// with zoom like the rest of the sea: the water bleeds BLEED_TILES past the
+// rectangle, then a 7-texel trim: line, gap, 3-texel zigzag, gap, line.
+const float BLEED_TILES = 6.0;
+const float BORDER_LINE1 = 1.0;
+const float BORDER_GAP1 = 1.0;
+const float BORDER_ZIG = 3.0;
+const float BORDER_GAP2 = 1.0;
+const float BORDER_LINE2 = 1.0;
+
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
@@ -249,10 +260,6 @@ vec2 parShift(vec2 w, float depth) {
 vec2 parPos(vec2 p, float dep) {
   vec2 w = p + parShift(p, dep);
   return mix(w, floor(w) + 0.5, uSnap);
-}
-// the pixel is inside the map raster; outside it the overlay must stay clear
-float within01(vec2 uv) {
-  return step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
 }
 
 void main() {
@@ -451,7 +458,49 @@ void main() {
   float swell = fbm(p * 0.018 + vec2(uTime * 0.015, 13.0)) - 0.5;
   col *= 1.0 + swell * uSwell * deep * wet;
 
-  outColor = vec4(col * uBrightness, within01(p / uSize));
+  col *= uBrightness;   // sea colour only: the border below overrides it
+
+  // ---- map border ----
+  // The border lives on the texel grid: p is snapped to texel centres, so every
+  // cell below is exactly one map texel wide and the edges stay crisp at any
+  // zoom. The sea runs BLEED_TILES past the rectangle (the bakes clamp), then
+  // the 7-texel trim starts; outside it the page shows through. The trim is
+  // drawn after the sea and takes no brightness, parallax or warp.
+  float seaA = 1.0;
+  vec2 overTiles = max(vec2(0.0), max(-p, p - uSize));  // tiles out, >= 0
+  vec2 outIdx = floor(overTiles);            // 0-based texel index outside
+  float outT = max(outIdx.x, outIdx.y);      // Chebyshev: nearest side wins
+  if (outT >= BLEED_TILES) {
+    float b1 = BLEED_TILES + BORDER_LINE1;
+    float b2 = b1 + BORDER_GAP1;
+    float b3 = b2 + BORDER_ZIG;
+    float b4 = b3 + BORDER_GAP2;
+    float b5 = b4 + BORDER_LINE2;
+    seaA = 0.0;
+    col = vec3(0.0);
+    if (outT < b1) {                             // line
+      col = vec3(1.0);
+      seaA = 1.0;
+    } else if (outT >= b2 && outT < b3) {        // 3-texel zigzag
+      // along the nearest side: vertical position for left/right, horizontal
+      // for top/bottom. The painted column steps 0,1,2,1 every 4 texels, so
+      // the chain reads as a diagonal staircase.
+      float along = floor(overTiles.x >= overTiles.y ? p.y : p.x);
+      float across = outT - b2;                  // 0..2 within the sub-band
+      float k = mod(along, 4.0);
+      float zigCol = k < 0.5 ? 0.0 : (k < 1.5 ? 1.0 : (k < 2.5 ? 2.0 : 1.0));
+      if (abs(across - zigCol) < 0.5) {
+        col = vec3(1.0);
+        seaA = 1.0;
+      }
+    } else if (outT >= b4 && outT < b5) {        // line
+      col = vec3(1.0);
+      seaA = 1.0;
+    }
+    // the two gaps and everything past the trim stay transparent black
+  }
+
+  outColor = vec4(col, seaA);
 }`;
 
 /* ---- sea-ui.js ---- */
