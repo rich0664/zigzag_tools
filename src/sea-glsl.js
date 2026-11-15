@@ -31,6 +31,7 @@ uniform vec2 uDirA, uDirB;
 uniform float uSpeedA, uSpeedB, uScaleA, uScaleB;
 uniform float uParallax, uDeepSlow, uWaveIn, uWaveOut, uPomLayers;
 uniform float uAlongScale, uBrightness, uNoiseLayers;
+uniform float uReveal;          // 0..1 depth-masked intro (deep water first)
 
 // ---- map border -------------------------------------------------------------
 // Everything here is in map texels (one texel per cell), so the trim scales
@@ -326,7 +327,12 @@ void main() {
   // the 9-texel band starts; outside it the page shows through. The band is an
   // opaque black backing with white rules on it, drawn after the sea, so it
   // takes no brightness, parallax or warp.
-  float seaA = 1.0;
+  // the sea content fades in by depth: quantise to the depth texel's 8-bit
+  // code so the soft edge follows the contours, deep water first and the shore
+  // last. The trim below is not masked.
+  float dq = floor(depth01 * 255.0 + 0.5) / 255.0;
+  float thr = 1.25 - 1.55 * uReveal;
+  float seaA = smoothstep(thr - 0.02, thr + 0.02, dq);
   vec2 overTiles = max(vec2(0.0), max(-p, p - uSize));  // tiles out, >= 0
   vec2 outIdx = floor(overTiles);            // 0-based texel index outside
   float outT = max(outIdx.x, outIdx.y);      // Chebyshev: nearest side wins

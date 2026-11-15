@@ -187,7 +187,8 @@ function mountSeaUi(opts) {
     wave.setAttribute('fill', 'currentColor');
     wave.setAttribute('aria-hidden', 'true');
     wave.setAttribute('focusable', 'false');
-    wave.style.cssText = 'display:block;width:18px;height:18px;pointer-events:none';
+    wave.style.cssText = 'display:block;width:18px;height:18px;pointer-events:none;' +
+      'opacity:.6;transition:opacity .2s';
     const wavePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     wavePath.setAttribute('d', SEA_UI_WAVE_PATH);
     wave.append(wavePath);
@@ -478,7 +479,9 @@ function mountSeaUi(opts) {
 
     function showLabel(on) {
       label.style.opacity = on ? '.6' : '0';
+      // like the notifications icon: dim rests at .6 x .6, hover takes both to 1
       button.style.opacity = on ? '1' : '.6';
+      wave.style.opacity = on ? '1' : '.6';
     }
 
     button.addEventListener('click', () => setOpen(!open));

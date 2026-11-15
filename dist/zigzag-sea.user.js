@@ -178,6 +178,7 @@ uniform vec2 uDirA, uDirB;
 uniform float uSpeedA, uSpeedB, uScaleA, uScaleB;
 uniform float uParallax, uDeepSlow, uWaveIn, uWaveOut, uPomLayers;
 uniform float uAlongScale, uBrightness, uNoiseLayers;
+uniform float uReveal;          // 0..1 depth-masked intro (deep water first)
 
 // ---- map border -------------------------------------------------------------
 // Everything here is in map texels (one texel per cell), so the trim scales
@@ -473,7 +474,12 @@ void main() {
   // the 9-texel band starts; outside it the page shows through. The band is an
   // opaque black backing with white rules on it, drawn after the sea, so it
   // takes no brightness, parallax or warp.
-  float seaA = 1.0;
+  // the sea content fades in by depth: quantise to the depth texel's 8-bit
+  // code so the soft edge follows the contours, deep water first and the shore
+  // last. The trim below is not masked.
+  float dq = floor(depth01 * 255.0 + 0.5) / 255.0;
+  float thr = 1.25 - 1.55 * uReveal;
+  float seaA = smoothstep(thr - 0.02, thr + 0.02, dq);
   vec2 overTiles = max(vec2(0.0), max(-p, p - uSize));  // tiles out, >= 0
   vec2 outIdx = floor(overTiles);            // 0-based texel index outside
   float outT = max(outIdx.x, outIdx.y);      // Chebyshev: nearest side wins
@@ -700,7 +706,8 @@ function mountSeaUi(opts) {
     wave.setAttribute('fill', 'currentColor');
     wave.setAttribute('aria-hidden', 'true');
     wave.setAttribute('focusable', 'false');
-    wave.style.cssText = 'display:block;width:18px;height:18px;pointer-events:none';
+    wave.style.cssText = 'display:block;width:18px;height:18px;pointer-events:none;' +
+      'opacity:.6;transition:opacity .2s';
     const wavePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     wavePath.setAttribute('d', SEA_UI_WAVE_PATH);
     wave.append(wavePath);
@@ -991,7 +998,9 @@ function mountSeaUi(opts) {
 
     function showLabel(on) {
       label.style.opacity = on ? '.6' : '0';
+      // like the notifications icon: dim rests at .6 x .6, hover takes both to 1
       button.style.opacity = on ? '1' : '.6';
+      wave.style.opacity = on ? '1' : '.6';
     }
 
     button.addEventListener('click', () => setOpen(!open));
@@ -1262,14 +1271,19 @@ function mountSeaUi(opts) {
       ov = document.createElement('canvas');
       ov.id = OV_ID;
     }
-    if (ov.parentNode !== deck.parentNode || ov.nextElementSibling !== deck) {
-      deck.parentNode.insertBefore(ov, deck);
+    // the loading noise sits behind the sea canvas; the 2D placeholder is
+    // hidden while it is up during an animated build (the noise replaces it)
+    const noise = document.getElementById(NOISE_ID);
+    const marker = deck;
+    if (ov.parentNode !== deck.parentNode || ov.nextElementSibling !== marker) {
+      deck.parentNode.insertBefore(ov, marker);
     }
     ov.style.cssText = (deck.getAttribute('style') || '') + ';pointer-events:none';
     // cssText replaced every style above, including the hide applied by
     // setOn(false); re-apply it so a rebuild while off cannot reveal the sea.
-    ov.style.display = state.on ? '' : 'none';
-    ov.style.opacity = String(state.opacity);
+    ov.style.display =
+      state.on && !(noise && state.mode !== 'static') ? '' : 'none';
+    if (!staticFadeAt) ov.style.opacity = String(state.opacity);
     ov.style.filter = `brightness(${state.brightness})`;
     // work in CSS pixels: quality settings and devicePixelRatio change the
     // canvas backing store, which would otherwise shift the projection
@@ -1338,6 +1352,16 @@ function mountSeaUi(opts) {
 
     state.draws++;
 
+    // The first painted 2D sea is the end of the first load: the noise fades
+    // out under it while the canvas itself fades in from transparent.
+    if (state.mode === 'static') {
+      firstLoad = false;
+      if (!staticFadeAt && noiseVisible()) {
+        fadeStaticIn(ov);
+        hideNoise(NOISE_FADE_MS);
+      }
+    }
+
     // A lost WebGL canvas keeps its last composited frame. Hide (never remove)
     // it only now that the 2D replacement has painted, so there is never a
     // frame with no visible sea layer; webglcontextrestored still finds it.
@@ -1393,12 +1417,204 @@ function mountSeaUi(opts) {
       img.onerror = () => {
         colourPromise = null;
         state.error = 'texture: failed to load ' + url('zigzag-sea.webp');
+        hideNoise(0);
         refreshUi();
         reject(new Error(state.error));
       };
       img.src = url('zigzag-sea.webp');
     });
     return colourPromise;
+  }
+
+  // ---- loading noise and the depth reveal ----------------------------------
+  // While a first load has no sea layer to look at, a dark pixel-noise canvas
+  // sits immediately behind the sea canvas, clipped to the map rectangle. It is
+  // refreshed on a ~9 fps timer (not per frame), never takes pointer events and
+  // is removed as soon as there is something to show.
+  const NOISE_ID = 'zz-sea-noise';
+  const NOISE_MS = 110;
+  const NOISE_FADE_MS = 400;
+  const STATIC_FADE_MS = 600;
+  let noiseTimer = 0;
+  let noiseFade = 0;
+  let noiseBuf = null;
+  let staticFadeAt = 0;
+  let firstLoad = true;           // no sea layer has been painted yet
+  let retryPending = false;
+
+  const noiseVisible = () => !!document.getElementById(NOISE_ID);
+
+  // The intro ramps run once per fresh build that showed the noise. The debug
+  // hook can pin them for deterministic sampling.
+  const NEUTRAL_RAMPS = { reveal: 1, wave: 1, grain: 1, flow: 1 };
+  const INTRO_REVEAL_MS = 1600;
+  const INTRO_WAVE_START_MS = 1500;
+  const INTRO_WAVE_MS = 1400;
+  const INTRO_FLOW_MS = 2200;
+  let introStart = 0;             // 0 = not running
+  let introPending = false;       // set at the first frame of a fresh build
+  let introOverride = null;
+  let introNoiseHidden = false;
+
+  function introRamps(now) {
+    if (introOverride) return introOverride;
+    if (!introStart) return NEUTRAL_RAMPS;
+    const t = now - introStart;
+    return {
+      reveal: clamp(t / INTRO_REVEAL_MS, 0, 1),
+      wave: clamp((t - INTRO_WAVE_START_MS) / INTRO_WAVE_MS, 0, 1),
+      grain: clamp(t / INTRO_REVEAL_MS, 0, 1),
+      flow: clamp(t / INTRO_FLOW_MS, 0, 1),
+    };
+  }
+
+  function startIntro() {
+    introStart = 0;
+    introPending = true;
+    introNoiseHidden = false;
+  }
+
+  function stopIntro() {
+    introPending = false;
+    introStart = 0;
+  }
+
+  // `__zzSea.intro({reveal, waveRamp, grainRamp, flowRamp})` pins the ramps;
+  // `intro(null)` lets the automatic timeline resume.
+  function setIntro(v) {
+    if (v === null || v === undefined) {
+      introOverride = null;
+      return introRamps(performance.now());
+    }
+    if (typeof v !== 'object') return introRamps(performance.now());
+    const n = (x, d) => (isFinite(Number(x)) ? clamp(Number(x), 0, 1) : d);
+    introOverride = {
+      reveal: n(v.reveal, 1),
+      wave: n(v.waveRamp, 1),
+      grain: n(v.grainRamp, 1),
+      flow: n(v.flowRamp, 1),
+    };
+    return introOverride;
+  }
+
+  function noiseCanvas() {
+    let n = document.getElementById(NOISE_ID);
+    if (!n) {
+      n = document.createElement('canvas');
+      n.id = NOISE_ID;
+      n.style.pointerEvents = 'none';
+    }
+    return n;
+  }
+
+  function paintNoise() {
+    const n = document.getElementById(NOISE_ID);
+    const deck = deckCanvas();
+    if (!n || !deck || !state.on || document.hidden) { hideNoise(0); return; }
+    const W = n.width, H = n.height;
+    if (!W || !H) return;
+    const c = n.getContext('2d');
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.clearRect(0, 0, W, H);
+    c.imageSmoothingEnabled = false;
+
+    // clip to the map rectangle, with the same geometry the 2D path uses
+    const vs = viewState(deck);
+    const pad = (vs && vs.padding) || {};
+    const z = vs ? Math.pow(2, vs.zoom) : 0;
+    if (vs && z > 0) {
+      const dx = clamp(((pad.left || 0) + W - (pad.right || 0)) / 2, 0, W) - W / 2;
+      const dy = clamp(((pad.top || 0) + H - (pad.bottom || 0)) / 2, 0, H) - H / 2;
+      const tx = vs.target[0] + 0.5, ty = vs.target[1] + 0.5;
+      const ox = W / 2 + dx - tx * z;
+      const oy = H / 2 + dy + (MAP_H - 0.5 - ty) * z;
+      c.beginPath();
+      c.rect(ox, oy - MAP_H * z, MAP_W * z, MAP_H * z);
+      c.clip();
+    }
+
+    // 1/8 resolution noise, scaled up with smoothing off: blocky, near black
+    const nw = Math.max(1, Math.ceil(W / 8)), nh = Math.max(1, Math.ceil(H / 8));
+    if (!noiseBuf || noiseBuf.width !== nw || noiseBuf.height !== nh) {
+      noiseBuf = document.createElement('canvas');
+      noiseBuf.width = nw;
+      noiseBuf.height = nh;
+    }
+    const b = noiseBuf.getContext('2d');
+    const img = b.createImageData(nw, nh);
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4) {
+      const v = 8 + ((Math.random() * 29) | 0);
+      d[i] = v; d[i + 1] = v; d[i + 2] = v; d[i + 3] = 255;
+    }
+    b.putImageData(img, 0, 0);
+    c.drawImage(noiseBuf, 0, 0, W, H);
+  }
+
+  // The noise sits immediately behind the sea canvas, so it covers neither the
+  // map nor the sea and never takes a pointer event.
+  function showNoise() {
+    if (!state.on) return false;
+    const deck = deckCanvas();
+    if (!deck || !deck.parentNode) return false;
+    if (noiseFade) { clearTimeout(noiseFade); noiseFade = 0; }
+    const n = noiseCanvas();
+    const gl = document.getElementById(GL_ID);
+    const ov = document.getElementById(OV_ID);
+    const sea = gl && gl.parentNode === deck.parentNode ? gl
+      : ov && ov.parentNode === deck.parentNode ? ov : null;
+    const before = sea || deck;
+    if (n.parentNode !== deck.parentNode || n.nextElementSibling !== before) {
+      deck.parentNode.insertBefore(n, before);
+    }
+    // same CSS box as the sea canvas
+    n.style.cssText = (deck.getAttribute('style') || '') + ';pointer-events:none';
+    n.style.opacity = String(state.opacity);
+    const w = deck.clientWidth || deck.width;
+    const h = deck.clientHeight || deck.height;
+    if (n.width !== w || n.height !== h) {
+      n.width = w;
+      n.height = h;
+    }
+    if (!noiseTimer) noiseTimer = setInterval(paintNoise, NOISE_MS);
+    paintNoise();
+    return true;
+  }
+
+  function hideNoise(fadeMs) {
+    if (noiseTimer) { clearInterval(noiseTimer); noiseTimer = 0; }
+    if (noiseFade) { clearTimeout(noiseFade); noiseFade = 0; }
+    const n = document.getElementById(NOISE_ID);
+    if (!n) return;
+    const remove = () => {
+      const el = document.getElementById(NOISE_ID);
+      if (el) el.remove();
+    };
+    if (!fadeMs) { remove(); return; }
+    const t0 = performance.now();
+    const step = () => {
+      const el = document.getElementById(NOISE_ID);
+      if (!el) return;
+      const t = Math.min(1, (performance.now() - t0) / fadeMs);
+      el.style.opacity = String(state.opacity * (1 - t));
+      if (t < 1) noiseFade = setTimeout(step, 50);
+      else { noiseFade = 0; remove(); }
+    };
+    step();
+  }
+
+  // The 2D path has no shader intro: it fades in under the noise.
+  function fadeStaticIn(ov) {
+    staticFadeAt = performance.now();
+    ov.style.opacity = '0';
+    const step = () => {
+      if (!staticFadeAt) return;
+      const t = Math.min(1, (performance.now() - staticFadeAt) / STATIC_FADE_MS);
+      if (ov.isConnected) ov.style.opacity = String(state.opacity * t);
+      if (t < 1) setTimeout(step, 50);
+      else staticFadeAt = 0;
+    };
+    step();
   }
 
   // ---- GL path -------------------------------------------------------------
@@ -1477,6 +1693,7 @@ function mountSeaUi(opts) {
     'uDeflect', 'uDeflectReach', 'uTravelMax', 'uWarp', 'uWarpBias', 'uDirA', 'uDirB',
     'uSpeedA', 'uSpeedB', 'uScaleA', 'uScaleB', 'uParallax', 'uDeepSlow', 'uWaveIn',
     'uWaveOut', 'uPomLayers', 'uAlongScale', 'uBrightness', 'uNoiseLayers',
+    'uReveal',
   ];
 
   // modeSettings().uniforms keys that set one float uniform unchanged; the
@@ -1661,6 +1878,14 @@ function mountSeaUi(opts) {
     state.loading = true;
     refreshUi();
 
+    // A first load (or a retry after a failure) has no sea layer to show, so
+    // put the noise up and run the depth reveal once the textures are in.
+    // Later builds — a static→animated switch or a context-loss restore — keep
+    // whatever is on screen and start at full reveal.
+    const noisy = (firstLoad || retryPending) && showNoise();
+    retryPending = false;
+    if (!noisy) stopIntro();
+
     // colour NEAREST (1 texel per tile); aux/flow/speed LINEAR; dist NEAREST
     // (always sampled on a texel centre because snap is on)
     const specs = [
@@ -1702,6 +1927,7 @@ function mountSeaUi(opts) {
       state.glReady = true;
       state.loading = false;
       state.error = null;
+      if (noisy) startIntro();
       startGL();
       refreshUi();
     }).catch(e => {
@@ -1793,7 +2019,7 @@ function mountSeaUi(opts) {
     if (c.canvas) c.canvas.remove();
   }
 
-  function renderFrame(c, w, h, cam, t, settings) {
+  function renderFrame(c, w, h, cam, t, settings, ramps) {
     const { gl, uni, tex, size } = c;
     gl.viewport(0, 0, w, h);
     gl.useProgram(c.prog);
@@ -1814,6 +2040,25 @@ function mountSeaUi(opts) {
     gl.uniform1f(uni.uAlongScale, seaConsts.alongScale);
     gl.uniform1f(uni.uBrightness, state.brightness);
     setModeUniforms(gl, uni, settings.uniforms);
+
+    // intro ramps: the sea reveals by depth, the waves come in behind it, the
+    // grain fades up with the reveal and the drift starts fast, settling to
+    // the tuned value. At rest these are all 1 and change nothing.
+    const r = ramps || NEUTRAL_RAMPS;
+    const u = settings.uniforms;
+    gl.uniform1f(uni.uReveal, r.reveal);
+    if (r.wave < 1) {
+      gl.uniform1f(uni.uWaveIn, u.win * r.wave);
+      gl.uniform1f(uni.uWaveOut, u.wout * r.wave);
+      gl.uniform1f(uni.uFoam, u.foam * r.wave);
+    }
+    if (r.grain < 1) gl.uniform1f(uni.uGrain, u.grain * r.grain);
+    if (r.flow < 1) {
+      const k = 1 + 0.5 * (1 - r.flow);
+      gl.uniform1f(uni.uFlowSpeed, u.flow * k);
+      gl.uniform1f(uni.uSpeedA, u.aspeed * k);
+      gl.uniform1f(uni.uSpeedB, u.bspeed * k);
+    }
 
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, tex.colour);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, tex.aux);
@@ -1881,20 +2126,31 @@ function mountSeaUi(opts) {
 
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
     const target = seaTarget(vs);
-    const t0 = performance.now();
+    const now = performance.now();
+    if (introPending) { introPending = false; introStart = now; }
+    const ramps = introRamps(now);
+    const t0 = now;
     renderFrame(glc, w, h, {
       tx: target[0], ty: target[1],
       zoom: cam.zoomPx, zoomCss: cam.zoomPx / scale,
       centerX: cam.centerX, centerY: cam.centerY,
-    }, t, settings);
+    }, t, settings, ramps);
     pushRing(frameMs, performance.now() - t0);
     state.draws++;
     lastDrawnSig = viewSig(vs);
+
+    // Once the reveal has finished the sea stands on its own: fade the noise
+    // out underneath it and drop it.
+    if (!introNoiseHidden && ramps.reveal >= 1 && noiseVisible()) {
+      introNoiseHidden = true;
+      hideNoise(NOISE_FADE_MS);
+    }
 
     // The first real frame means the 2D canvas can go: the opaque-enough water
     // is already in the drawing buffer, so removing it cannot show a blank.
     if (!glc.first && state.on) {
       glc.first = true;
+      firstLoad = false;
       holdStatic = false;
       removeStaticCanvas();
     }
@@ -2152,6 +2408,7 @@ function mountSeaUi(opts) {
     const target = wantedMode && wantedMode !== 'static'
       ? wantedMode
       : pickMode('', env);
+    retryPending = true;       // a retry has nothing on screen: noise + reveal
     return requestMode(target);
   }
 
@@ -2201,7 +2458,7 @@ function mountSeaUi(opts) {
         tx, ty,
         zoom: zoom * scale, zoomCss: zoom,
         centerX: bw / 2, centerY: bh / 2,
-      }, t, settings);
+      }, t, settings, introRamps(performance.now()));
 
       const px = new Uint8Array(bw * bh * 4);
       glc.gl.readPixels(0, 0, bw, bh, glc.gl.RGBA, glc.gl.UNSIGNED_BYTE, px);
@@ -2273,11 +2530,13 @@ function mountSeaUi(opts) {
       try {
         // Warm up, then wait for the GPU so the clock measures work instead of
         // command submission.
-        renderFrame(glc, sized.w, sized.h, frame, start / 1000, settings);
+        renderFrame(glc, sized.w, sized.h, frame, start / 1000, settings,
+          introRamps(start));
         syncGL(glc.gl);
         const t0 = performance.now();
         for (let i = 0; i < 60; i++) {
-          renderFrame(glc, sized.w, sized.h, frame, start / 1000 + i / 60, settings);
+          renderFrame(glc, sized.w, sized.h, frame, start / 1000 + i / 60, settings,
+            introRamps(start));
         }
         syncGL(glc.gl);
         ms = performance.now() - t0;
@@ -2320,6 +2579,7 @@ function mountSeaUi(opts) {
         renderer: '2D',
         draws: state.draws,
         moving: false,
+        intro: { ...introRamps(performance.now()) },
       };
     }
     return {
@@ -2331,6 +2591,7 @@ function mountSeaUi(opts) {
       renderer: shortRenderer(rendererName),
       draws: state.draws,
       moving: !!state.moving,
+      intro: { ...introRamps(performance.now()) },
     };
   }
 
@@ -2386,6 +2647,7 @@ function mountSeaUi(opts) {
     if (!state.on) {
       stopStatic();
       stopGL();
+      hideNoise(0);
       refreshUi();
       return state.on;
     }
@@ -2406,6 +2668,7 @@ function mountSeaUi(opts) {
   state.debugRender = debugRender;
   state.liveViewState = liveViewState;
   state.stats = stats;
+  state.intro = setIntro;
   state.bench = bench;
   state.retry = retry;
   state.setFps30 = setFps30;
@@ -2456,7 +2719,7 @@ function mountSeaUi(opts) {
   });
 
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { stopStatic(); stopGL(); }
+    if (document.hidden) { stopStatic(); stopGL(); hideNoise(0); }
     else if (state.mode === 'static') {
       if (!state.img) loadColour().catch(() => {});
       startStatic();
@@ -2481,6 +2744,7 @@ function mountSeaUi(opts) {
     watchForDeck();
     applyPendingMode();            // no-op until the deck exists / the sea is on
   } else if (state.on) {
+    showNoise();                   // nothing to show until the colour decodes
     startStatic();
   }
 })();
