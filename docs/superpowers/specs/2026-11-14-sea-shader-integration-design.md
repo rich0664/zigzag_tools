@@ -80,6 +80,7 @@ prototype defaults.
 | open-water noise | two layers averaged | two layers | one layer | one layer |
 | parallax / POM | on, `par 0.814`, `pom 5` | off (`par 0`, `pom 1`) | off | off |
 | warp | `3.3`, fully depth-biased | `3.3` | `0` | `0` |
+| grain | `0.03` | `0.03` | `0.04` — no warp, so a touch more open-water grain | `0.04` |
 | render scale | 1.0 | 1.0 | 1.0 | 0.5 |
 
 `static` renders nothing through WebGL: the shipped colour WebP is blitted by

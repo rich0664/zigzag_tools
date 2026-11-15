@@ -69,7 +69,7 @@ describe('modeSettings', () => {
   });
 
   it('animated tiers differ from baseline only in the tier keys', () => {
-    const tierKeys = ['par', 'pom', 'warp', 'flowMode', 'noiseLayers'];
+    const tierKeys = ['par', 'pom', 'warp', 'flowMode', 'noiseLayers', 'grain'];
     const base = modeSettings('baseline').uniforms;
     for (const id of ['medium', 'low', 'extra-low']) {
       const u = modeSettings(id).uniforms;
@@ -79,15 +79,23 @@ describe('modeSettings', () => {
         assert.equal(u[k], base[k], `${id} changes ${k}`);
       }
     }
-    // only par/pom differ at medium; low adds warp/flowMode/noiseLayers
+    // only par/pom differ at medium; low adds warp/flowMode/noiseLayers/grain
     assert.deepEqual(
       Object.keys(base).filter(k => modeSettings('medium').uniforms[k] !== base[k]).sort(),
       ['par', 'pom'],
     );
     assert.deepEqual(
       Object.keys(base).filter(k => modeSettings('low').uniforms[k] !== base[k]).sort(),
-      ['flowMode', 'noiseLayers', 'par', 'pom', 'warp'],
+      ['flowMode', 'grain', 'noiseLayers', 'par', 'pom', 'warp'],
     );
+    assert.deepEqual(
+      Object.keys(base).filter(k => modeSettings('extra-low').uniforms[k] !== base[k]).sort(),
+      ['flowMode', 'grain', 'noiseLayers', 'par', 'pom', 'warp'],
+    );
+    // no warp in low, so the open-water grain is a touch stronger than baseline
+    assert.equal(modeSettings('low').uniforms.grain, 0.04);
+    assert.equal(modeSettings('extra-low').uniforms.grain, 0.04);
+    assert.equal(modeSettings('medium').uniforms.grain, base.grain);
   });
 
   it('only extra-low changes the render scale', () => {
