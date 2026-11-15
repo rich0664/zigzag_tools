@@ -86,19 +86,24 @@ prototype defaults.
 the existing 2D path (today's `src/sea.js`), so it costs one decode and one
 draw per camera change.
 
-Baseline uniform values to ship as constants (from the tuned prototype URL):
+Baseline uniform values to ship as constants (retuned on the prototype,
+variant P, 2026-11-15 — commit `98106d5`):
 
 ```
-shore 8.8   shelf 29    flow 2.31   wave 1.9    grain 0.06  foam 0.25
-deep 1.0    swell 0.008 win 0.28    wout 0.82   cycle 7     dslow 1.0
-par 0.814   pom 5       warp 3.3    wbias 1.0
+shore 16    shelf 26    flow 3.12   wave 2.5    grain 0.03  foam 0.25
+deep 0.6    swell 0.008 win 0.58    wout 0.82   cycle 7     dslow 0.91
+par 0.976   pom 5       warp 1.6    wbias 1.0
 adir 254    aspeed 1.42 ascale 0.156
-bdir 45     bspeed 1.16 bscale 0.12
-curves: pc 0,0.057,0.339,0.578,1
+bdir 45     bspeed 1.16 bscale 0.046
+curves: pc 0,0.187,0.339,0.578,1
         sc 0,0.057,0.274,0.492,0.926
-        wc 0,0.13,0.435,0.594,1
+        wc 0,0.187,0.426,0.594,1
 clamp off, calm 0, texel-res on
 ```
+
+The prototype's depth is a crop-preview bake; the shipped depth uses
+whole-map p1/p99 (see R6 in the ledger), so `par 0.976` and `deep 0.6` are
+judged on the live map, not on the prototype.
 
 Texel-res stays on: one effect value per texture pixel, snapped to the tile
 grid, as in the prototype. Extra low renders at half the canvas backing store
@@ -164,8 +169,8 @@ Rationale for splitting the prototype's single `aux`:
 Encoding and precision:
 
 - Distance is stored as **√(d / 600)**, as the prototype does, not linearly.
-  Near the coast that is ~0.01 tiles per code step, 0.6 at `shore 8.8` and
-  ~1.0 at `shelf 29` — the same quantisation the tuned look was built on. A
+  Near the coast that is ~0.01 tiles per code step, 0.8 at `shore 16` and
+  ~1.0 at `shelf 26` — the same quantisation the tuned look was built on. A
   linear /600 encoding (2.35 tiles per step) would staircase the shore and
   could not match variant P.
 - The along vector's 8-bit range is set by one **global** scale constant, not
