@@ -546,9 +546,10 @@ const SEA_UI_MODE_LABELS = {
   static: 'static',
 };
 
-// A 12 x 12 pixel wave (two stacked waves), drawn at 24 px so each grid cell
-// is exactly 2 x 2 device pixels. The path is the union of the filled cells,
-// one subpath per run.
+// A 12 x 12 pixel wave (two stacked waves). It renders at 18 px, the same
+// optical size as the notifications glyph: 1.5 px per cell, smoothly scaled
+// like the app's 362 px notification PNG rather than snapped to whole pixels.
+// The path is the union of the filled cells, one subpath per run.
 const SEA_UI_WAVE_PATH = 'M3 2h3v1h-3z M9 2h3v1h-3z M3 3h1v1h-1z M5 3h2v1h-2z M9 3h1v1h-1z M11 3h1v1h-1z M0 4h1v1h-1z M2 4h2v1h-2z M6 4h1v1h-1z M8 4h2v1h-2z M0 5h3v1h-3z M6 5h3v1h-3z M3 7h3v1h-3z M9 7h3v1h-3z M0 8h1v1h-1z M2 8h2v1h-2z M5 8h2v1h-2z M8 8h2v1h-2z M11 8h1v1h-1z M0 9h1v1h-1z M2 9h1v1h-1z M6 9h1v1h-1z M8 9h1v1h-1z M0 10h3v1h-3z M6 10h3v1h-3z';
 
 const SEA_UI_INK = '#dbe6ec';
@@ -693,14 +694,13 @@ function mountSeaUi(opts) {
     applyFont(button);
 
     const wave = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    wave.setAttribute('width', '24');
-    wave.setAttribute('height', '24');
+    wave.setAttribute('width', '18');
+    wave.setAttribute('height', '18');
     wave.setAttribute('viewBox', '0 0 12 12');
-    wave.setAttribute('shape-rendering', 'crispEdges');
     wave.setAttribute('fill', 'currentColor');
     wave.setAttribute('aria-hidden', 'true');
     wave.setAttribute('focusable', 'false');
-    wave.style.cssText = 'display:block;width:24px;height:24px;pointer-events:none';
+    wave.style.cssText = 'display:block;width:18px;height:18px;pointer-events:none';
     const wavePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     wavePath.setAttribute('d', SEA_UI_WAVE_PATH);
     wave.append(wavePath);
