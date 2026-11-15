@@ -546,13 +546,9 @@ const SEA_UI_MODE_LABELS = {
   static: 'static',
 };
 
-// A 16 x 16 pixel wave: 2 px rows of 4 px blocks, as eight crisp rectangles.
-const SEA_UI_WAVE = [
-  [0, 4, 4, 2], [8, 4, 4, 2],
-  [4, 6, 4, 2], [12, 6, 4, 2],
-  [0, 8, 4, 2], [8, 8, 4, 2],
-  [4, 10, 4, 2], [12, 10, 4, 2],
-];
+// A 24 x 24 pixel wave (two stacked waves, 3 crests each), drawn at 18 px. The
+// path is the union of the filled 1x1 cells, one subpath per run.
+const SEA_UI_WAVE_PATH = 'M8 4h3v1h-3z M20 4h3v1h-3z M7 5h5v1h-5z M19 5h5v1h-5z M7 6h1v1h-1z M11 6h1v1h-1z M19 6h1v1h-1z M23 6h1v1h-1z M0 7h1v1h-1z M6 7h1v1h-1z M12 7h1v1h-1z M18 7h1v1h-1z M0 8h1v1h-1z M6 8h1v1h-1z M12 8h1v1h-1z M18 8h1v1h-1z M1 9h1v1h-1z M5 9h1v1h-1z M13 9h1v1h-1z M17 9h1v1h-1z M1 10h5v1h-5z M13 10h5v1h-5z M2 11h3v1h-3z M14 11h3v1h-3z M8 13h3v1h-3z M20 13h3v1h-3z M7 14h5v1h-5z M19 14h5v1h-5z M7 15h1v1h-1z M11 15h1v1h-1z M19 15h1v1h-1z M23 15h1v1h-1z M0 16h1v1h-1z M6 16h1v1h-1z M12 16h1v1h-1z M18 16h1v1h-1z M0 17h1v1h-1z M6 17h1v1h-1z M12 17h1v1h-1z M18 17h1v1h-1z M1 18h1v1h-1z M5 18h1v1h-1z M13 18h1v1h-1z M17 18h1v1h-1z M1 19h5v1h-5z M13 19h5v1h-5z M2 20h3v1h-3z M14 20h3v1h-3z';
 
 const SEA_UI_INK = '#dbe6ec';
 const SEA_UI_TRACK = '#4a5f6b';
@@ -696,22 +692,17 @@ function mountSeaUi(opts) {
     applyFont(button);
 
     const wave = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    wave.setAttribute('width', '16');
-    wave.setAttribute('height', '16');
-    wave.setAttribute('viewBox', '0 0 16 16');
+    wave.setAttribute('width', '18');
+    wave.setAttribute('height', '18');
+    wave.setAttribute('viewBox', '0 0 24 24');
     wave.setAttribute('shape-rendering', 'crispEdges');
     wave.setAttribute('fill', 'currentColor');
     wave.setAttribute('aria-hidden', 'true');
     wave.setAttribute('focusable', 'false');
-    wave.style.cssText = 'display:block;width:16px;height:16px;pointer-events:none';
-    for (const [x, y, w, h] of SEA_UI_WAVE) {
-      const rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
-      rect.setAttribute('x', String(x));
-      rect.setAttribute('y', String(y));
-      rect.setAttribute('width', String(w));
-      rect.setAttribute('height', String(h));
-      wave.append(rect);
-    }
+    wave.style.cssText = 'display:block;width:18px;height:18px;pointer-events:none';
+    const wavePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    wavePath.setAttribute('d', SEA_UI_WAVE_PATH);
+    wave.append(wavePath);
 
     const label = seaUiEl('span', [
       'position:absolute', 'right:34px', 'top:50%', 'transform:translateY(-50%)',
