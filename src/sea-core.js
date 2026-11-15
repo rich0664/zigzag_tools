@@ -50,6 +50,25 @@ function modeSettings(id) {
   return { shader: true, renderScale: id === 'extra-low' ? 0.5 : 1, uniforms };
 }
 
+// Bytes per texel of each uploaded bake under the sized internal formats the
+// GL path uses, plus the three 1D curve LUTs (3 x 128 RGBA8 texels). Kept next
+// to the mode table so the VRAM readout and its test share one source.
+const TEX_BYTES = { colour: 4, dist: 1, aux: 3, flow: 3, speed: 1 };
+const CURVE_BYTES = 3 * 128 * 4;
+
+// GPU bytes for the shader's textures from the decoded sizes the runtime
+// tracks (`{ colour: [w, h], ... }`). A size that is not uploaded yet is not
+// counted; the curve LUTs always are.
+function vramBytes(sizes) {
+  let bytes = CURVE_BYTES;
+  for (const [key, perTexel] of Object.entries(TEX_BYTES)) {
+    const s = sizes && sizes[key];
+    if (!s) continue;
+    bytes += Number(s[0]) * Number(s[1]) * perTexel;
+  }
+  return bytes;
+}
+
 // saved mode wins; weak devices (no WebGL2, small max texture, touch, narrow
 // viewport) stay on the free 2D overlay
 function pickMode(saved, env) {
@@ -112,5 +131,5 @@ function assetUrl(name, base = seaConsts.assetBase) {
 
 export {
   MODE_IDS, modeSettings, pickMode, parseState, renderSize,
-  cameraUniforms, fpsGate, assetUrl, shaderCapable,
+  cameraUniforms, fpsGate, assetUrl, shaderCapable, vramBytes,
 };

@@ -63,6 +63,25 @@ function modeSettings(id) {
   return { shader: true, renderScale: id === 'extra-low' ? 0.5 : 1, uniforms };
 }
 
+// Bytes per texel of each uploaded bake under the sized internal formats the
+// GL path uses, plus the three 1D curve LUTs (3 x 128 RGBA8 texels). Kept next
+// to the mode table so the VRAM readout and its test share one source.
+const TEX_BYTES = { colour: 4, dist: 1, aux: 3, flow: 3, speed: 1 };
+const CURVE_BYTES = 3 * 128 * 4;
+
+// GPU bytes for the shader's textures from the decoded sizes the runtime
+// tracks (`{ colour: [w, h], ... }`). A size that is not uploaded yet is not
+// counted; the curve LUTs always are.
+function vramBytes(sizes) {
+  let bytes = CURVE_BYTES;
+  for (const [key, perTexel] of Object.entries(TEX_BYTES)) {
+    const s = sizes && sizes[key];
+    if (!s) continue;
+    bytes += Number(s[0]) * Number(s[1]) * perTexel;
+  }
+  return bytes;
+}
+
 // saved mode wins; weak devices (no WebGL2, small max texture, touch, narrow
 // viewport) stay on the free 2D overlay
 function pickMode(saved, env) {
@@ -483,6 +502,12 @@ function seaUiEl(tag, css) {
 function mountSeaUi(opts) {
   const getState = () => (opts && opts.getState ? opts.getState() : null);
   const onChange = patch => (opts && opts.onChange ? opts.onChange(patch) : null);
+  const getStats = () => (opts && opts.getStats ? opts.getStats() : null);
+  const runBench = () => {
+    if (opts && typeof opts.bench === 'function') return opts.bench();
+    const sea = typeof window !== 'undefined' && window.__zzSea;
+    return sea && typeof sea.bench === 'function' ? sea.bench() : null;
+  };
 
   let ui = null;                 // the mounted HUD, when the header exists
   let anchor = null;             // the notifications button it is anchored to
@@ -663,7 +688,61 @@ function mountSeaUi(opts) {
       'background:transparent;border:1px solid #ffffff44;border-radius:3px;' +
       'color:inherit;font:inherit;font-size:11px;cursor:pointer';
 
-    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, status, retryBtn);
+    // Diagnostics: the VRAM estimate, the frame rate and the renderer, read on
+    // demand from the runtime. The interval only runs while the menu is open.
+    const diag = seaUiEl('div', 'display:flex;align-items:flex-start;gap:5px;' +
+      'margin-top:7px;padding-top:6px;border-top:1px solid #ffffff1a');
+    const diagText = seaUiEl('div', 'flex:1;min-width:0;font-family:ui-monospace,' +
+      'SFMono-Regular,Menlo,monospace;font-size:10px;line-height:1.4;opacity:.6');
+    const diagLine1 = seaUiEl('div', 'white-space:normal;overflow-wrap:anywhere');
+    const diagLine2 = seaUiEl('div', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis');
+    diagText.append(diagLine1, diagLine2);
+    const benchBtn = document.createElement('button');
+    benchBtn.type = 'button';
+    benchBtn.id = 'zz-sea-bench';
+    benchBtn.textContent = 'bench';
+    benchBtn.style.cssText = 'flex:0 0 auto;padding:1px 5px;background:transparent;' +
+      'border:1px solid #ffffff33;border-radius:3px;color:inherit;font:inherit;' +
+      'font-size:10px;line-height:1.4;cursor:pointer;opacity:.8';
+    diag.append(diagText, benchBtn);
+
+    // textContent, not innerHTML: the renderer string is page-controlled.
+    function paintStats(s) {
+      if (!s) {
+        diagLine1.textContent = '';
+        diagLine2.textContent = '';
+        return;
+      }
+      const mb = (Number(s.vramMB) || 0).toFixed(1);
+      const kind = s.mode === 'static' ? 'image' : 'VRAM';
+      const fps = Math.round(Number(s.fps) || 0);
+      const ms = (Number(s.ms) || 0).toFixed(1);
+      diagLine1.textContent = `${mb} MB ${kind} · ${fps} fps · ${ms} ms ${s.msKind || 'cpu'}`;
+      diagLine2.textContent = s.renderer || '';
+    }
+
+    let statsTimer = 0;
+    function stopStats() {
+      if (statsTimer) clearInterval(statsTimer);
+      statsTimer = 0;
+    }
+    function startStats() {
+      stopStats();
+      paintStats(getStats());
+      statsTimer = setInterval(() => paintStats(getStats()), 500);
+    }
+
+    benchBtn.addEventListener('click', () => {
+      let r = null;
+      try { r = runBench(); } catch (e) { r = { error: String((e && e.message) || e) }; }
+      if (!r) return;
+      diagLine1.textContent = r.error
+        ? `bench: ${r.error}`
+        : `${r.mode} ${(Number(r.ms) || 0).toFixed(1)} ms / ${Math.round(Number(r.fps) || 0)} fps`;
+      diagLine2.textContent = '';
+    });
+
+    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, diag, status, retryBtn);
 
     wrap.append(button, menu);
     document.body.appendChild(wrap);
@@ -696,6 +775,9 @@ function mountSeaUi(opts) {
       status.title = err;
       retryBtn.style.display =
         err && !loading && s.canUseShader !== false ? 'inline-block' : 'none';
+
+      // a mode switch changes fps/ms/VRAM: repaint the readout right away
+      if (open) paintStats(getStats());
     }
 
     function emit(patch) {
@@ -742,7 +824,10 @@ function mountSeaUi(opts) {
       button.setAttribute('aria-expanded', open ? 'true' : 'false');
       if (open) {
         sync(getState());          // pick up async runtime changes on open
+        startStats();              // and only here does the readout poll
         reposition();
+      } else {
+        stopStats();
       }
     }
 
@@ -800,6 +885,7 @@ function mountSeaUi(opts) {
     reposition();
 
     function destroy() {
+      stopStats();
       observer.disconnect();
       window.removeEventListener('resize', onResize);
       document.removeEventListener('pointerdown', onPointerDown, true);
@@ -1081,11 +1167,16 @@ function mountSeaUi(opts) {
     const sy1 = clamp(Math.ceil((MAP_H - 0.5 - wy0) * pxt) + 1, 0, img.height);
     if (sx1 <= sx0 || sy1 <= sy0) return;
 
+    const t0 = performance.now();
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, W, H);
     c.imageSmoothingEnabled = false;               // one texel, one map cell
     c.setTransform(s, 0, 0, -s, ox, oy);
     c.drawImage(img, sx0, sy0, sx1 - sx0, sy1 - sy0, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    lastDrawMs = performance.now() - t0;
+    const now = performance.now();
+    staticDraws.push(now);
+    while (staticDraws.length && now - staticDraws[0] > 1000) staticDraws.shift();
 
     state.draws++;
 
@@ -1156,6 +1247,25 @@ function mountSeaUi(opts) {
 
   let glc = null;
   let nextAt = 0;                 // fps gate clock, ms; 0 admits the first frame
+
+  // ---- diagnostics ---------------------------------------------------------
+  // Rings of the last 60 rendered GL frames: the CPU time around renderFrame
+  // and the gap between drawn frames. Static keeps its draw timestamps instead.
+  // Everything here is read on demand by stats(), never per frame.
+  const FRAME_RING = 60;
+  const frameMs = [];
+  const frameGaps = [];
+  let lastFrameAt = 0;
+  let lastDrawMs = 0;
+  let rendererName = '';          // unmasked WebGL renderer, read once per build
+  const staticDraws = [];         // timestamps of 2D draws, last second only
+
+  function pushRing(ring, v) {
+    ring.push(v);
+    if (ring.length > FRAME_RING) ring.shift();
+  }
+
+  const meanOf = a => a.reduce((s, v) => s + v, 0) / a.length;
 
   function compile(gl, type, src) {
     const s = gl.createShader(type);
@@ -1339,6 +1449,16 @@ function mountSeaUi(opts) {
       alpha: true, premultipliedAlpha: false, antialias: false, depth: false,
     });
     if (!gl) { canvas.remove(); throw new Error('webgl2 unavailable'); }
+
+    // one read of the unmasked renderer per build; the diagnostics shorten it
+    rendererName = '';
+    frameMs.length = 0;
+    frameGaps.length = 0;
+    lastFrameAt = 0;
+    try {
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      if (info) rendererName = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL) || '');
+    } catch { rendererName = ''; }
 
     let prog;
     try { prog = link(gl); } catch (e) { canvas.remove(); throw e; }
@@ -1594,11 +1714,13 @@ function mountSeaUi(opts) {
 
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
     const target = seaTarget(vs);
+    const t0 = performance.now();
     renderFrame(glc, w, h, {
       tx: target[0], ty: target[1],
       zoom: cam.zoomPx, zoomCss: cam.zoomPx / scale,
       centerX: cam.centerX, centerY: cam.centerY,
     }, t, settings);
+    pushRing(frameMs, performance.now() - t0);
     state.draws++;
 
     // The first real frame means the 2D canvas can go: the opaque-enough water
@@ -1623,7 +1745,11 @@ function mountSeaUi(opts) {
       // the loop still runs every rAF; the gate decides which frames draw
       const gate = fpsGate(now, nextAt, state.fps30);
       nextAt = gate.nextAt;
-      if (gate.draw) drawGL(now / 1000);
+      if (gate.draw) {
+        if (lastFrameAt) pushRing(frameGaps, now - lastFrameAt);
+        lastFrameAt = now;
+        drawGL(now / 1000);
+      }
     } catch (e) {
       // A GL exception (including a lost context surfacing as one) is a
       // fallback, never a page error.
@@ -1995,6 +2121,43 @@ function mountSeaUi(opts) {
     }
   }
 
+  // ---- diagnostics ---------------------------------------------------------
+  // The unmasked renderer string is long to the point of uselessness in a 190 px
+  // panel: "ANGLE (Intel, Intel(R) UHD Graphics 630 ...)" reads as "ANGLE
+  // (Intel)", and anything longer than 40 chars is clipped.
+  function shortRenderer(raw) {
+    if (!raw) return 'WebGL2';
+    const m = /^ANGLE \(([^,)]+)/.exec(raw);
+    const s = m ? `ANGLE (${m[1]})` : raw;
+    return s.length > 40 ? s.slice(0, 39) + '…' : s;
+  }
+
+  function stats() {
+    if (state.mode === 'static') {
+      const now = performance.now();
+      while (staticDraws.length && now - staticDraws[0] > 1000) staticDraws.shift();
+      return {
+        mode: state.mode,
+        // no GL textures exist here: the decoded 2D image is the memory
+        vramMB: (MAP_W * MAP_H * 4) / 1e6,
+        fps: staticDraws.length,      // draws in the last second; 0 when idle
+        ms: lastDrawMs,
+        msKind: 'cpu',
+        renderer: '2D',
+        draws: state.draws,
+      };
+    }
+    return {
+      mode: state.mode,
+      vramMB: vramBytes(glc ? glc.size : null) / 1e6,
+      fps: frameGaps.length >= 2 ? 1000 / meanOf(frameGaps) : 0,
+      ms: frameMs.length ? meanOf(frameMs) : 0,
+      msKind: 'cpu',
+      renderer: shortRenderer(rendererName),
+      draws: state.draws,
+    };
+  }
+
   // ---- menu-facing setters -------------------------------------------------
   // Brightness is the 0.5..1.5 multiplier, the same unit parseState returns and
   // the shader/CSS use; the menu passes its percentage divided by 100.
@@ -2060,6 +2223,7 @@ function mountSeaUi(opts) {
   state.setMode = setMode;
   state.debugRender = debugRender;
   state.liveViewState = liveViewState;
+  state.stats = stats;
   state.bench = bench;
   state.retry = retry;
   state.setFps30 = setFps30;
@@ -2104,7 +2268,9 @@ function mountSeaUi(opts) {
     return uiState();
   }
 
-  seaUi = mountSeaUi({ getState: uiState, onChange: applyChange });
+  seaUi = mountSeaUi({
+    getState: uiState, onChange: applyChange, getStats: stats, bench,
+  });
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); }

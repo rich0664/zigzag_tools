@@ -245,11 +245,16 @@
     const sy1 = clamp(Math.ceil((MAP_H - 0.5 - wy0) * pxt) + 1, 0, img.height);
     if (sx1 <= sx0 || sy1 <= sy0) return;
 
+    const t0 = performance.now();
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, W, H);
     c.imageSmoothingEnabled = false;               // one texel, one map cell
     c.setTransform(s, 0, 0, -s, ox, oy);
     c.drawImage(img, sx0, sy0, sx1 - sx0, sy1 - sy0, sx0, sy0, sx1 - sx0, sy1 - sy0);
+    lastDrawMs = performance.now() - t0;
+    const now = performance.now();
+    staticDraws.push(now);
+    while (staticDraws.length && now - staticDraws[0] > 1000) staticDraws.shift();
 
     state.draws++;
 
@@ -320,6 +325,25 @@
 
   let glc = null;
   let nextAt = 0;                 // fps gate clock, ms; 0 admits the first frame
+
+  // ---- diagnostics ---------------------------------------------------------
+  // Rings of the last 60 rendered GL frames: the CPU time around renderFrame
+  // and the gap between drawn frames. Static keeps its draw timestamps instead.
+  // Everything here is read on demand by stats(), never per frame.
+  const FRAME_RING = 60;
+  const frameMs = [];
+  const frameGaps = [];
+  let lastFrameAt = 0;
+  let lastDrawMs = 0;
+  let rendererName = '';          // unmasked WebGL renderer, read once per build
+  const staticDraws = [];         // timestamps of 2D draws, last second only
+
+  function pushRing(ring, v) {
+    ring.push(v);
+    if (ring.length > FRAME_RING) ring.shift();
+  }
+
+  const meanOf = a => a.reduce((s, v) => s + v, 0) / a.length;
 
   function compile(gl, type, src) {
     const s = gl.createShader(type);
@@ -503,6 +527,16 @@
       alpha: true, premultipliedAlpha: false, antialias: false, depth: false,
     });
     if (!gl) { canvas.remove(); throw new Error('webgl2 unavailable'); }
+
+    // one read of the unmasked renderer per build; the diagnostics shorten it
+    rendererName = '';
+    frameMs.length = 0;
+    frameGaps.length = 0;
+    lastFrameAt = 0;
+    try {
+      const info = gl.getExtension('WEBGL_debug_renderer_info');
+      if (info) rendererName = String(gl.getParameter(info.UNMASKED_RENDERER_WEBGL) || '');
+    } catch { rendererName = ''; }
 
     let prog;
     try { prog = link(gl); } catch (e) { canvas.remove(); throw e; }
@@ -758,11 +792,13 @@
 
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
     const target = seaTarget(vs);
+    const t0 = performance.now();
     renderFrame(glc, w, h, {
       tx: target[0], ty: target[1],
       zoom: cam.zoomPx, zoomCss: cam.zoomPx / scale,
       centerX: cam.centerX, centerY: cam.centerY,
     }, t, settings);
+    pushRing(frameMs, performance.now() - t0);
     state.draws++;
 
     // The first real frame means the 2D canvas can go: the opaque-enough water
@@ -787,7 +823,11 @@
       // the loop still runs every rAF; the gate decides which frames draw
       const gate = fpsGate(now, nextAt, state.fps30);
       nextAt = gate.nextAt;
-      if (gate.draw) drawGL(now / 1000);
+      if (gate.draw) {
+        if (lastFrameAt) pushRing(frameGaps, now - lastFrameAt);
+        lastFrameAt = now;
+        drawGL(now / 1000);
+      }
     } catch (e) {
       // A GL exception (including a lost context surfacing as one) is a
       // fallback, never a page error.
@@ -1159,6 +1199,43 @@
     }
   }
 
+  // ---- diagnostics ---------------------------------------------------------
+  // The unmasked renderer string is long to the point of uselessness in a 190 px
+  // panel: "ANGLE (Intel, Intel(R) UHD Graphics 630 ...)" reads as "ANGLE
+  // (Intel)", and anything longer than 40 chars is clipped.
+  function shortRenderer(raw) {
+    if (!raw) return 'WebGL2';
+    const m = /^ANGLE \(([^,)]+)/.exec(raw);
+    const s = m ? `ANGLE (${m[1]})` : raw;
+    return s.length > 40 ? s.slice(0, 39) + '…' : s;
+  }
+
+  function stats() {
+    if (state.mode === 'static') {
+      const now = performance.now();
+      while (staticDraws.length && now - staticDraws[0] > 1000) staticDraws.shift();
+      return {
+        mode: state.mode,
+        // no GL textures exist here: the decoded 2D image is the memory
+        vramMB: (MAP_W * MAP_H * 4) / 1e6,
+        fps: staticDraws.length,      // draws in the last second; 0 when idle
+        ms: lastDrawMs,
+        msKind: 'cpu',
+        renderer: '2D',
+        draws: state.draws,
+      };
+    }
+    return {
+      mode: state.mode,
+      vramMB: vramBytes(glc ? glc.size : null) / 1e6,
+      fps: frameGaps.length >= 2 ? 1000 / meanOf(frameGaps) : 0,
+      ms: frameMs.length ? meanOf(frameMs) : 0,
+      msKind: 'cpu',
+      renderer: shortRenderer(rendererName),
+      draws: state.draws,
+    };
+  }
+
   // ---- menu-facing setters -------------------------------------------------
   // Brightness is the 0.5..1.5 multiplier, the same unit parseState returns and
   // the shader/CSS use; the menu passes its percentage divided by 100.
@@ -1224,6 +1301,7 @@
   state.setMode = setMode;
   state.debugRender = debugRender;
   state.liveViewState = liveViewState;
+  state.stats = stats;
   state.bench = bench;
   state.retry = retry;
   state.setFps30 = setFps30;
@@ -1268,7 +1346,9 @@
     return uiState();
   }
 
-  seaUi = mountSeaUi({ getState: uiState, onChange: applyChange });
+  seaUi = mountSeaUi({
+    getState: uiState, onChange: applyChange, getStats: stats, bench,
+  });
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); }

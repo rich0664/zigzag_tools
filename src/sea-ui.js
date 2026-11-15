@@ -45,6 +45,12 @@ function seaUiEl(tag, css) {
 function mountSeaUi(opts) {
   const getState = () => (opts && opts.getState ? opts.getState() : null);
   const onChange = patch => (opts && opts.onChange ? opts.onChange(patch) : null);
+  const getStats = () => (opts && opts.getStats ? opts.getStats() : null);
+  const runBench = () => {
+    if (opts && typeof opts.bench === 'function') return opts.bench();
+    const sea = typeof window !== 'undefined' && window.__zzSea;
+    return sea && typeof sea.bench === 'function' ? sea.bench() : null;
+  };
 
   let ui = null;                 // the mounted HUD, when the header exists
   let anchor = null;             // the notifications button it is anchored to
@@ -225,7 +231,61 @@ function mountSeaUi(opts) {
       'background:transparent;border:1px solid #ffffff44;border-radius:3px;' +
       'color:inherit;font:inherit;font-size:11px;cursor:pointer';
 
-    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, status, retryBtn);
+    // Diagnostics: the VRAM estimate, the frame rate and the renderer, read on
+    // demand from the runtime. The interval only runs while the menu is open.
+    const diag = seaUiEl('div', 'display:flex;align-items:flex-start;gap:5px;' +
+      'margin-top:7px;padding-top:6px;border-top:1px solid #ffffff1a');
+    const diagText = seaUiEl('div', 'flex:1;min-width:0;font-family:ui-monospace,' +
+      'SFMono-Regular,Menlo,monospace;font-size:10px;line-height:1.4;opacity:.6');
+    const diagLine1 = seaUiEl('div', 'white-space:normal;overflow-wrap:anywhere');
+    const diagLine2 = seaUiEl('div', 'white-space:nowrap;overflow:hidden;text-overflow:ellipsis');
+    diagText.append(diagLine1, diagLine2);
+    const benchBtn = document.createElement('button');
+    benchBtn.type = 'button';
+    benchBtn.id = 'zz-sea-bench';
+    benchBtn.textContent = 'bench';
+    benchBtn.style.cssText = 'flex:0 0 auto;padding:1px 5px;background:transparent;' +
+      'border:1px solid #ffffff33;border-radius:3px;color:inherit;font:inherit;' +
+      'font-size:10px;line-height:1.4;cursor:pointer;opacity:.8';
+    diag.append(diagText, benchBtn);
+
+    // textContent, not innerHTML: the renderer string is page-controlled.
+    function paintStats(s) {
+      if (!s) {
+        diagLine1.textContent = '';
+        diagLine2.textContent = '';
+        return;
+      }
+      const mb = (Number(s.vramMB) || 0).toFixed(1);
+      const kind = s.mode === 'static' ? 'image' : 'VRAM';
+      const fps = Math.round(Number(s.fps) || 0);
+      const ms = (Number(s.ms) || 0).toFixed(1);
+      diagLine1.textContent = `${mb} MB ${kind} · ${fps} fps · ${ms} ms ${s.msKind || 'cpu'}`;
+      diagLine2.textContent = s.renderer || '';
+    }
+
+    let statsTimer = 0;
+    function stopStats() {
+      if (statsTimer) clearInterval(statsTimer);
+      statsTimer = 0;
+    }
+    function startStats() {
+      stopStats();
+      paintStats(getStats());
+      statsTimer = setInterval(() => paintStats(getStats()), 500);
+    }
+
+    benchBtn.addEventListener('click', () => {
+      let r = null;
+      try { r = runBench(); } catch (e) { r = { error: String((e && e.message) || e) }; }
+      if (!r) return;
+      diagLine1.textContent = r.error
+        ? `bench: ${r.error}`
+        : `${r.mode} ${(Number(r.ms) || 0).toFixed(1)} ms / ${Math.round(Number(r.fps) || 0)} fps`;
+      diagLine2.textContent = '';
+    });
+
+    menu.append(onRow, quality, opacity.el, brightness.el, fpsRow, diag, status, retryBtn);
 
     wrap.append(button, menu);
     document.body.appendChild(wrap);
@@ -258,6 +318,9 @@ function mountSeaUi(opts) {
       status.title = err;
       retryBtn.style.display =
         err && !loading && s.canUseShader !== false ? 'inline-block' : 'none';
+
+      // a mode switch changes fps/ms/VRAM: repaint the readout right away
+      if (open) paintStats(getStats());
     }
 
     function emit(patch) {
@@ -304,7 +367,10 @@ function mountSeaUi(opts) {
       button.setAttribute('aria-expanded', open ? 'true' : 'false');
       if (open) {
         sync(getState());          // pick up async runtime changes on open
+        startStats();              // and only here does the readout poll
         reposition();
+      } else {
+        stopStats();
       }
     }
 
@@ -362,6 +428,7 @@ function mountSeaUi(opts) {
     reposition();
 
     function destroy() {
+      stopStats();
       observer.disconnect();
       window.removeEventListener('resize', onResize);
       document.removeEventListener('pointerdown', onPointerDown, true);

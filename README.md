@@ -50,7 +50,10 @@ window.__zzSea.on                // current state; read it, use setOn to change 
 
 The panel holds, in order: sea on/off; quality; opacity (0–100); brightness
 (50–150%); and a **30 fps limit** toggle. Every choice is remembered in
-`localStorage`.
+`localStorage`. A diagnostics block at the bottom shows the texture VRAM
+estimate (the decoded image in `static`), fps, CPU ms per frame and the GPU
+renderer, with a **bench** button; it only polls while the panel is open, and
+`window.__zzSea.stats()` returns the same numbers.
 
 ### Quality modes
 

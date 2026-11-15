@@ -2,7 +2,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   MODE_IDS, modeSettings, pickMode, parseState, renderSize,
-  cameraUniforms, fpsGate, assetUrl, shaderCapable,
+  cameraUniforms, fpsGate, assetUrl, shaderCapable, vramBytes,
 } from '../src/sea-core.js';
 import seaConsts from '../src/sea-consts.json' with { type: 'json' };
 
@@ -287,6 +287,22 @@ describe('cameraUniforms', () => {
     const back = cameraUniforms(vs(0, { top: 100, bottom: 40 }), 1000, 500, 2000, 1000);
     assert.equal(back.centerY, 440);       // 1000 - ((250 + 30) * 2)
     assert.equal(c.centerY + back.centerY, 1000);   // mirrored padding mirrors the centre
+  });
+});
+
+describe('vramBytes', () => {
+  it('prices the shipped bakes at 237.1 MB', () => {
+    // the real asset dimensions under dist/
+    const mb = vramBytes({
+      colour: [7749, 5254], dist: [7749, 5254], aux: [3875, 2627],
+      flow: [484, 328], speed: [1937, 1313],
+    }) / 1e6;
+    assert.ok(Math.abs(mb - 237.1) <= 0.1, `got ${mb}`);
+  });
+
+  it('counts only the sizes uploaded so far, plus the curve LUTs', () => {
+    assert.equal(vramBytes({}), 3 * 128 * 4);
+    assert.equal(vramBytes({ dist: [10, 10] }), 3 * 128 * 4 + 100);
   });
 });
 
