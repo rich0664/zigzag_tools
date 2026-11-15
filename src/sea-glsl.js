@@ -35,13 +35,17 @@ uniform float uAlongScale, uBrightness, uNoiseLayers;
 // ---- map border -------------------------------------------------------------
 // Everything here is in map texels (one texel per cell), so the trim scales
 // with zoom like the rest of the sea: the water bleeds BLEED_TILES past the
-// rectangle, then a 7-texel trim: line, gap, 3-texel zigzag, gap, line.
+// rectangle, then a 9-texel band: black, line, black, 3-texel zigzag, black,
+// line, black. The band is a solid opaque-black backing, the zigzag's unpainted
+// cells included; only past it does the page show through.
 const float BLEED_TILES = 6.0;
+const float BORDER_BLACK_IN = 1.0;
 const float BORDER_LINE1 = 1.0;
-const float BORDER_GAP1 = 1.0;
+const float BORDER_BLACK1 = 1.0;
 const float BORDER_ZIG = 3.0;
-const float BORDER_GAP2 = 1.0;
+const float BORDER_BLACK2 = 1.0;
 const float BORDER_LINE2 = 1.0;
+const float BORDER_BLACK_OUT = 1.0;
 
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
@@ -319,40 +323,41 @@ void main() {
   // The border lives on the texel grid: p is snapped to texel centres, so every
   // cell below is exactly one map texel wide and the edges stay crisp at any
   // zoom. The sea runs BLEED_TILES past the rectangle (the bakes clamp), then
-  // the 7-texel trim starts; outside it the page shows through. The trim is
-  // drawn after the sea and takes no brightness, parallax or warp.
+  // the 9-texel band starts; outside it the page shows through. The band is an
+  // opaque black backing with white rules on it, drawn after the sea, so it
+  // takes no brightness, parallax or warp.
   float seaA = 1.0;
   vec2 overTiles = max(vec2(0.0), max(-p, p - uSize));  // tiles out, >= 0
   vec2 outIdx = floor(overTiles);            // 0-based texel index outside
   float outT = max(outIdx.x, outIdx.y);      // Chebyshev: nearest side wins
   if (outT >= BLEED_TILES) {
-    float b1 = BLEED_TILES + BORDER_LINE1;
-    float b2 = b1 + BORDER_GAP1;
-    float b3 = b2 + BORDER_ZIG;
-    float b4 = b3 + BORDER_GAP2;
-    float b5 = b4 + BORDER_LINE2;
-    seaA = 0.0;
-    col = vec3(0.0);
-    if (outT < b1) {                             // line
+    float b0 = BLEED_TILES;                  // black band starts here
+    float b1 = b0 + BORDER_BLACK_IN;         // inner white line
+    float b2 = b1 + BORDER_LINE1;            // black
+    float b3 = b2 + BORDER_BLACK1;           // 3-texel zigzag
+    float b4 = b3 + BORDER_ZIG;              // black
+    float b5 = b4 + BORDER_BLACK2;           // outer white line
+    float b6 = b5 + BORDER_LINE2;            // black
+    float b7 = b6 + BORDER_BLACK_OUT;        // end of the band
+    // every cell in the band is opaque; only past b7 is the page visible
+    seaA = outT < b7 ? 1.0 : 0.0;
+    col = vec3(0.0);                         // black backing
+    if (outT >= b1 && outT < b2) {           // inner white line
       col = vec3(1.0);
-      seaA = 1.0;
-    } else if (outT >= b2 && outT < b3) {        // 3-texel zigzag
+    } else if (outT >= b3 && outT < b4) {    // 3-texel zigzag
       // along the nearest side: vertical position for left/right, horizontal
       // for top/bottom. The painted column steps 0,1,2,1 every 4 texels, so
       // the chain reads as a diagonal staircase.
       float along = floor(overTiles.x >= overTiles.y ? p.y : p.x);
-      float across = outT - b2;                  // 0..2 within the sub-band
+      float across = outT - b3;              // 0..2 within the sub-band
       float k = mod(along, 4.0);
       float zigCol = k < 0.5 ? 0.0 : (k < 1.5 ? 1.0 : (k < 2.5 ? 2.0 : 1.0));
       if (abs(across - zigCol) < 0.5) {
         col = vec3(1.0);
-        seaA = 1.0;
       }
-    } else if (outT >= b4 && outT < b5) {        // line
+    } else if (outT >= b5 && outT < b6) {    // outer white line
       col = vec3(1.0);
-      seaA = 1.0;
     }
-    // the two gaps and everything past the trim stay transparent black
   }
 
   outColor = vec4(col, seaA);
