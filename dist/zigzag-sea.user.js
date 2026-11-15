@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 (() => {
-const seaConsts = {"version":"0.3.0","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":8.8,"shelf":29,"flow":2.31,"wave":1.9,"grain":0.06,"foam":0.25,"deep":1,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.12,"par":0.814,"pom":5,"dslow":1,"win":0.28,"wout":0.82,"cycle":7,"warp":3.3,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.057,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.13,0.435,0.594,1]}};
+const seaConsts = {"version":"0.3.0","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":16,"shelf":26,"flow":3.12,"wave":2.5,"grain":0.03,"foam":0.25,"deep":0.6,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.046,"par":0.976,"pom":5,"dslow":0.91,"win":0.58,"wout":0.82,"cycle":7,"warp":1.6,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.187,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.187,0.426,0.594,1]}};
 
 /* ---- sea-core.js ---- */
 // Pure core of the sea overlay: quality modes, saved-state parsing, screen ↔

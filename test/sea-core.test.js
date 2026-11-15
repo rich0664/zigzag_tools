@@ -13,9 +13,9 @@ describe('modeSettings', () => {
     const s = modeSettings('baseline');
     assert.equal(s.shader, true);
     assert.equal(s.renderScale, 1);
-    assert.equal(s.uniforms.par, 0.814);
+    assert.equal(s.uniforms.par, 0.976);
     assert.equal(s.uniforms.pom, 5);
-    assert.equal(s.uniforms.warp, 3.3);
+    assert.equal(s.uniforms.warp, 1.6);
     assert.equal(s.uniforms.flowMode, 1);   // LOD
     assert.equal(s.uniforms.noiseLayers, 2);
   });
@@ -23,7 +23,7 @@ describe('modeSettings', () => {
   it('medium only removes parallax', () => {
     assert.equal(modeSettings('medium').uniforms.par, 0);
     assert.equal(modeSettings('medium').uniforms.pom, 1);
-    assert.equal(modeSettings('medium').uniforms.warp, 3.3);
+    assert.equal(modeSettings('medium').uniforms.warp, 1.6);
   });
 
   it('low drops LOD, one noise layer and warp', () => {
