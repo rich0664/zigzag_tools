@@ -33,10 +33,10 @@ const SEA_UI_MODE_LABELS = {
   static: 'static',
 };
 
-// A 20 x 20 pixel wave (two stacked waves, 2-cell strokes), drawn at 20 px so
-// each grid cell is exactly one device pixel. The path is the union of the
-// filled 1x1 cells, one subpath per run.
-const SEA_UI_WAVE_PATH = 'M6 2h3v1h-3z M16 2h3v1h-3z M5 3h5v1h-5z M15 3h5v1h-5z M0 4h1v1h-1z M4 4h3v1h-3z M8 4h3v1h-3z M15 4h2v1h-2z M18 4h2v1h-2z M0 5h1v1h-1z M4 5h2v1h-2z M9 5h2v1h-2z M14 5h2v1h-2z M19 5h1v1h-1z M0 6h2v1h-2z M3 6h2v1h-2z M10 6h2v1h-2z M13 6h3v1h-3z M0 7h5v1h-5z M10 7h5v1h-5z M1 8h3v1h-3z M11 8h3v1h-3z M6 10h3v1h-3z M16 10h3v1h-3z M5 11h5v1h-5z M15 11h5v1h-5z M5 12h2v1h-2z M8 12h2v1h-2z M15 12h2v1h-2z M18 12h2v1h-2z M0 13h1v1h-1z M4 13h2v1h-2z M9 13h2v1h-2z M14 13h2v1h-2z M19 13h1v1h-1z M0 14h1v1h-1z M4 14h2v1h-2z M9 14h2v1h-2z M14 14h2v1h-2z M19 14h1v1h-1z M0 15h2v1h-2z M3 15h2v1h-2z M10 15h2v1h-2z M13 15h2v1h-2z M0 16h5v1h-5z M10 16h5v1h-5z M1 17h3v1h-3z M11 17h3v1h-3z';
+// A 12 x 12 pixel wave (two stacked waves), drawn at 24 px so each grid cell
+// is exactly 2 x 2 device pixels. The path is the union of the filled cells,
+// one subpath per run.
+const SEA_UI_WAVE_PATH = 'M3 2h3v1h-3z M9 2h3v1h-3z M3 3h1v1h-1z M5 3h2v1h-2z M9 3h1v1h-1z M11 3h1v1h-1z M0 4h1v1h-1z M2 4h2v1h-2z M6 4h1v1h-1z M8 4h2v1h-2z M0 5h3v1h-3z M6 5h3v1h-3z M3 7h3v1h-3z M9 7h3v1h-3z M0 8h1v1h-1z M2 8h2v1h-2z M5 8h2v1h-2z M8 8h2v1h-2z M11 8h1v1h-1z M0 9h1v1h-1z M2 9h1v1h-1z M6 9h1v1h-1z M8 9h1v1h-1z M0 10h3v1h-3z M6 10h3v1h-3z';
 
 const SEA_UI_INK = '#dbe6ec';
 const SEA_UI_TRACK = '#4a5f6b';
@@ -180,14 +180,14 @@ function mountSeaUi(opts) {
     applyFont(button);
 
     const wave = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    wave.setAttribute('width', '20');
-    wave.setAttribute('height', '20');
-    wave.setAttribute('viewBox', '0 0 20 20');
+    wave.setAttribute('width', '24');
+    wave.setAttribute('height', '24');
+    wave.setAttribute('viewBox', '0 0 12 12');
     wave.setAttribute('shape-rendering', 'crispEdges');
     wave.setAttribute('fill', 'currentColor');
     wave.setAttribute('aria-hidden', 'true');
     wave.setAttribute('focusable', 'false');
-    wave.style.cssText = 'display:block;width:20px;height:20px;pointer-events:none';
+    wave.style.cssText = 'display:block;width:24px;height:24px;pointer-events:none';
     const wavePath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
     wavePath.setAttribute('d', SEA_UI_WAVE_PATH);
     wave.append(wavePath);
