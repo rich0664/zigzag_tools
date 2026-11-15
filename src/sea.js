@@ -310,6 +310,7 @@
   function staticTick() {
     state.raf = 0;
     if (!state.on || document.hidden || !staticVisible()) return;
+    checkDeckRemount();
     try { drawStatic(); } catch (e) { state.error = errText(e); }
     state.raf = requestAnimationFrame(staticTick);
   }
@@ -574,6 +575,30 @@
       else staticFadeAt = 0;
     };
     step();
+  }
+
+  // ---- map remounts --------------------------------------------------------
+  // The app can tear the map view down and build it again inside the SPA: a new
+  // #deckgl-overlay element appears. That is a fresh load for the sea, so the
+  // noise and the reveal replay over the new map while the GL textures are
+  // reused. Only a change of element identity triggers it.
+  let deckAnchor = null;
+
+  function checkDeckRemount() {
+    const deck = deckCanvas();
+    if (!deck || deck === deckAnchor) return false;
+    const first = !deckAnchor;
+    deckAnchor = deck;
+    if (first) return false;
+    // a new map view: repaint into it and replay the first-load sequence
+    firstLoad = true;
+    state.sig = '';
+    hideNoise(0);
+    if (state.mode !== 'static' && state.on) {
+      showNoise();                        // re-anchors over the new map
+      if (glc && glc.ready && !glc.lost) startIntro();   // replay, no rebuild
+    }
+    return true;
   }
 
   // ---- GL path -------------------------------------------------------------
@@ -1134,6 +1159,7 @@
     glc.raf = 0;
     if (glc.lost || state.mode === 'static' || !state.on || document.hidden) return;
     try {
+      checkDeckRemount();
       // The loop still runs every rAF; the adaptive gate decides which frames
       // draw. Movement is measured against the last *drawn* camera, so skipped
       // still frames cannot hide a pan.
@@ -1550,6 +1576,8 @@
         intro: { ...liveRamps(performance.now()) },
         mapStatus: mapStatus(),
         colourFormat: state.colourFormat,
+        firstLoad,
+        introPending,
       };
     }
     return {
@@ -1564,6 +1592,8 @@
       intro: { ...liveRamps(performance.now()) },
       mapStatus: mapStatus(),
       colourFormat: state.colourFormat,
+      firstLoad,
+      introPending,
     };
   }
 

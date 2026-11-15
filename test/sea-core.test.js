@@ -15,7 +15,7 @@ describe('modeSettings', () => {
     assert.equal(s.renderScale, 1);
     assert.equal(s.uniforms.par, 0.976);
     assert.equal(s.uniforms.pom, 5);
-    assert.equal(s.uniforms.warp, 1.6);
+    assert.equal(s.uniforms.warp, 2.1);
     assert.equal(s.uniforms.flowMode, 1);   // LOD
     assert.equal(s.uniforms.noiseLayers, 2);
   });
@@ -23,7 +23,7 @@ describe('modeSettings', () => {
   it('medium only removes parallax', () => {
     assert.equal(modeSettings('medium').uniforms.par, 0);
     assert.equal(modeSettings('medium').uniforms.pom, 1);
-    assert.equal(modeSettings('medium').uniforms.warp, 1.6);
+    assert.equal(modeSettings('medium').uniforms.warp, 2.1);
   });
 
   it('low drops LOD, one noise layer and warp', () => {
@@ -93,8 +93,8 @@ describe('modeSettings', () => {
       ['flowMode', 'grain', 'noiseLayers', 'par', 'pom', 'warp'],
     );
     // no warp in low, so the open-water grain is a touch stronger than baseline
-    assert.equal(modeSettings('low').uniforms.grain, 0.04);
-    assert.equal(modeSettings('extra-low').uniforms.grain, 0.04);
+    assert.equal(modeSettings('low').uniforms.grain, 0.05);
+    assert.equal(modeSettings('extra-low').uniforms.grain, 0.05);
     assert.equal(modeSettings('medium').uniforms.grain, base.grain);
   });
 

@@ -45,7 +45,7 @@ function modeSettings(id) {
     uniforms.flowMode = 0;
     uniforms.noiseLayers = 1;
     // no warp: a little more open-water grain keeps the surface from reading flat
-    uniforms.grain = 0.04;
+    uniforms.grain = 0.05;
   }
   return { shader: true, renderScale: id === 'extra-low' ? 0.5 : 1, uniforms };
 }

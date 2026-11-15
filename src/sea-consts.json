@@ -11,11 +11,11 @@
   "speedCell": 4,
   "backingCap": 2560,
   "baseline": {
-    "shore": 16, "shelf": 26, "flow": 3.12, "wave": 2.5, "grain": 0.03,
+    "shore": 16, "shelf": 26, "flow": 3.7, "wave": 2.5, "grain": 0.04,
     "foam": 0.25, "deep": 0.6, "swell": 0.008, "adir": 254, "aspeed": 1.42,
     "ascale": 0.156, "bdir": 45, "bspeed": 1.16, "bscale": 0.046,
     "par": 0.976, "pom": 5, "dslow": 0.91, "win": 0.58, "wout": 0.82,
-    "cycle": 7.0, "warp": 1.6, "wbias": 1.0, "deflect": 1.0,
+    "cycle": 7.0, "warp": 2.1, "wbias": 1.0, "deflect": 1.0,
     "deflectReach": 50.0
   },
   "curves": {

@@ -81,8 +81,8 @@ prototype defaults.
 | flow | LOD (16-tile gyre + analytic bend) | LOD | 16-tile gyre only | 16-tile gyre only |
 | open-water noise | two layers averaged | two layers | one layer | one layer |
 | parallax / POM | on, `par 0.976`, `pom 5` | off (`par 0`, `pom 1`) | off | off |
-| warp | `1.6`, fully depth-biased | `1.6` | `0` | `0` |
-| grain | `0.03` | `0.03` | `0.04` — no warp, so a touch more open-water grain | `0.04` |
+| warp | `2.1`, fully depth-biased | `2.1` | `0` | `0` |
+| grain | `0.04` | `0.04` | `0.05` — no warp, so a touch more open-water grain | `0.05` |
 | render scale | 1.0 | 1.0 | 1.0 | 0.5 |
 
 `static` renders nothing through WebGL: the shipped colour WebP is blitted by
@@ -93,9 +93,9 @@ Baseline uniform values to ship as constants (retuned on the prototype,
 variant P, 2026-11-15 — commit `98106d5`):
 
 ```
-shore 16    shelf 26    flow 3.12   wave 2.5    grain 0.03  foam 0.25
+shore 16    shelf 26    flow 3.7    wave 2.5    grain 0.04  foam 0.25
 deep 0.6    swell 0.008 win 0.58    wout 0.82   cycle 7     dslow 0.91
-par 0.976   pom 5       warp 1.6    wbias 1.0
+par 0.976   pom 5       warp 2.1    wbias 1.0
 adir 254    aspeed 1.42 ascale 0.156
 bdir 45     bspeed 1.16 bscale 0.046
 curves: pc 0,0.187,0.339,0.578,1

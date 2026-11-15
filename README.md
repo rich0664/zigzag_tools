@@ -65,7 +65,7 @@ work removed.
 |---|---|
 | `baseline` (**fancy**) | nothing — LOD flow, two open-water noise layers, parallax/POM, depth-biased warp |
 | `medium` | parallax/POM (`par 0`, `pom 1`) |
-| `low` | also the warp, the analytic bend and the second noise layer: coarse 16-tile gyre only, and open-water grain `0.03 → 0.04` because there is no warp |
+| `low` | also the warp, the analytic bend and the second noise layer: coarse 16-tile gyre only, and open-water grain `0.04 → 0.05` because there is no warp |
 | `extra low` | same as `low`, rendered at half the backing-store resolution |
 | `static` | the shader entirely: the colour map blitted by the 2D path, one draw per camera change |
 

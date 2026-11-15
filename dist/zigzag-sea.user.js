@@ -9,7 +9,7 @@
 // ==/UserScript==
 
 (() => {
-const seaConsts = {"version":"0.3.1","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":16,"shelf":26,"flow":3.12,"wave":2.5,"grain":0.03,"foam":0.25,"deep":0.6,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.046,"par":0.976,"pom":5,"dslow":0.91,"win":0.58,"wout":0.82,"cycle":7,"warp":1.6,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.187,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.187,0.426,0.594,1]}};
+const seaConsts = {"version":"0.3.1","assetBase":"https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist","map":{"w":7749,"h":5254},"distMax":600,"alongScale":1.03,"heightLo":0.1606,"heightHi":1,"auxScale":2,"flowCell":16,"speedCell":4,"backingCap":2560,"baseline":{"shore":16,"shelf":26,"flow":3.7,"wave":2.5,"grain":0.04,"foam":0.25,"deep":0.6,"swell":0.008,"adir":254,"aspeed":1.42,"ascale":0.156,"bdir":45,"bspeed":1.16,"bscale":0.046,"par":0.976,"pom":5,"dslow":0.91,"win":0.58,"wout":0.82,"cycle":7,"warp":2.1,"wbias":1,"deflect":1,"deflectReach":50},"curves":{"pc":[0,0.187,0.339,0.578,1],"sc":[0,0.057,0.274,0.492,0.926],"wc":[0,0.187,0.426,0.594,1]}};
 
 /* ---- sea-core.js ---- */
 // Pure core of the sea overlay: quality modes, saved-state parsing, screen ↔
@@ -58,7 +58,7 @@ function modeSettings(id) {
     uniforms.flowMode = 0;
     uniforms.noiseLayers = 1;
     // no warp: a little more open-water grain keeps the surface from reading flat
-    uniforms.grain = 0.04;
+    uniforms.grain = 0.05;
   }
   return { shader: true, renderScale: id === 'extra-low' ? 0.5 : 1, uniforms };
 }
@@ -1399,6 +1399,7 @@ function mountSeaUi(opts) {
   function staticTick() {
     state.raf = 0;
     if (!state.on || document.hidden || !staticVisible()) return;
+    checkDeckRemount();
     try { drawStatic(); } catch (e) { state.error = errText(e); }
     state.raf = requestAnimationFrame(staticTick);
   }
@@ -1663,6 +1664,30 @@ function mountSeaUi(opts) {
       else staticFadeAt = 0;
     };
     step();
+  }
+
+  // ---- map remounts --------------------------------------------------------
+  // The app can tear the map view down and build it again inside the SPA: a new
+  // #deckgl-overlay element appears. That is a fresh load for the sea, so the
+  // noise and the reveal replay over the new map while the GL textures are
+  // reused. Only a change of element identity triggers it.
+  let deckAnchor = null;
+
+  function checkDeckRemount() {
+    const deck = deckCanvas();
+    if (!deck || deck === deckAnchor) return false;
+    const first = !deckAnchor;
+    deckAnchor = deck;
+    if (first) return false;
+    // a new map view: repaint into it and replay the first-load sequence
+    firstLoad = true;
+    state.sig = '';
+    hideNoise(0);
+    if (state.mode !== 'static' && state.on) {
+      showNoise();                        // re-anchors over the new map
+      if (glc && glc.ready && !glc.lost) startIntro();   // replay, no rebuild
+    }
+    return true;
   }
 
   // ---- GL path -------------------------------------------------------------
@@ -2223,6 +2248,7 @@ function mountSeaUi(opts) {
     glc.raf = 0;
     if (glc.lost || state.mode === 'static' || !state.on || document.hidden) return;
     try {
+      checkDeckRemount();
       // The loop still runs every rAF; the adaptive gate decides which frames
       // draw. Movement is measured against the last *drawn* camera, so skipped
       // still frames cannot hide a pan.
@@ -2639,6 +2665,8 @@ function mountSeaUi(opts) {
         intro: { ...liveRamps(performance.now()) },
         mapStatus: mapStatus(),
         colourFormat: state.colourFormat,
+        firstLoad,
+        introPending,
       };
     }
     return {
@@ -2653,6 +2681,8 @@ function mountSeaUi(opts) {
       intro: { ...liveRamps(performance.now()) },
       mapStatus: mapStatus(),
       colourFormat: state.colourFormat,
+      firstLoad,
+      introPending,
     };
   }
 
