@@ -96,6 +96,7 @@
   let whaleLoad = null;         // an in-flight route load
   let whaleEnabled = true;      // __zzSea.whale(false) disables it
   let whalePinSec = null;       // frozen route time, or null for the wall clock
+  let whalePinPose = null;      // __zzSea.whaleAt(...) pose pin, or null
   let clockSource = 'local';    // 'network' after a successful HEAD
 
   // wall epoch = anchor + performance.now()/1000. Start on the local clock; a
@@ -199,6 +200,10 @@
       state.whalePose = null;
       return;
     }
+    if (whalePinPose) {
+      state.whalePose = whalePinPose;
+      return;
+    }
     const tSec = whalePinSec !== null ? whalePinSec : wallNow(nowMs);
     setWhalePose(sampleWhale(whaleRoute, tSec));
   }
@@ -221,12 +226,14 @@
     if (arg === false) {
       whaleEnabled = false;
       whalePinSec = null;
+      whalePinPose = null;
       state.whalePose = null;
       return whaleStats();
     }
     if (arg === null) {
       whaleEnabled = true;
       whalePinSec = null;
+      whalePinPose = null;
       updateWhalePose(performance.now());
       return whaleStats();
     }
@@ -235,8 +242,36 @@
       if (isFinite(t)) {
         whaleEnabled = true;
         whalePinSec = t;
+        whalePinPose = null;
         updateWhalePose(performance.now());
       }
+    }
+    return whaleStats();
+  }
+
+  // Debug pose pin, for watching the whale wherever the camera already is:
+  // __zzSea.whaleAt({x, y, heading, depth}) freezes the body at that map point,
+  // __zzSea.whaleAt() does the same at the current view centre, and
+  // __zzSea.whaleAt(null) goes back to the route.
+  function setWhaleAt(pose) {
+    if (pose === null || pose === undefined) {
+      whalePinPose = null;
+      updateWhalePose(performance.now());
+      return whaleStats();
+    }
+    const src = (typeof pose === 'object' && pose.x !== undefined)
+      ? pose
+      : { x: state.camTarget ? state.camTarget[0] : 0,
+          y: state.camTarget ? state.camTarget[1] : 0 };
+    const p = {
+      x: Number(src.x), y: Number(src.y),
+      heading: Number(src.heading || 0), depth: Number(src.depth || 0),
+    };
+    if ([p.x, p.y, p.heading, p.depth].every(isFinite)) {
+      whaleEnabled = true;
+      whalePinSec = null;
+      whalePinPose = p;
+      updateWhalePose(performance.now());
     }
     return whaleStats();
   }
@@ -1288,6 +1323,7 @@
 
     const cam = cameraUniforms(vs, cssW, cssH, w, h);
     const target = seaTarget(vs);
+    state.camTarget = target;
     const now = performance.now();
     // The intro waits for the app's splash to lift: until the layer status is
     // ready (or unknown, as a fallback) the ramps stay at 0 and the noise stays
@@ -1905,6 +1941,7 @@
   state.setOn = setOn;
   state.setWhalePose = setWhalePose;
   state.whale = setWhale;
+  state.whaleAt = setWhaleAt;
 
   // ---- menu wiring and persistence ----------------------------------------
   // The menu reports a patch; this applies it, writes the zz-sea-* key and
