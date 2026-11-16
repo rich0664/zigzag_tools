@@ -220,16 +220,18 @@ trim all apply consistently and tiles occlude it on land.
   over it, so it reads as under the water, not pasted on glass.
 - Breached body (`Zworld > 0`) and the waterline sit above the grain; brightness
   and the reveal mask still apply.
-- The ring is the **coast effect at a shorter scale**, not a different wave:
-  the same two trains (`uWaveIn`, `uWaveOut`), wet line, foam, wobble and
-  breakup, called with the distance to the body contour and a whale shore width
-  of ~2.5 tiles. The spatial frequencies and the wobble/breakup amplitude are
-  scaled by `whaleShore / uShoreW`, so the shorter band shows the same number of
-  crests and the same relative wobble as a shoreline (an unscaled wobble would
-  tear it). The shelf glow is included at the same short scale, or omitted if
-  it reads wrong; the test image decides. Everything is multiplied by `surf`
-  (from the depth ramp), so it fades in/out and never appears while diving in
-  open water.
+- The ring is the **coast effect with a shorter shore width**, not a different
+  wave: the same two trains (`uWaveIn`, `uWaveOut`), wet line, foam, wobble and
+  breakup at the **exact same spatial frequencies and noise scales as the coast**
+  (no frequency or noise ratio scaling — scaling `freq` by `uShoreW / 2.5 = 6.4`
+  pushes the wavelength below 1 texel and aliases above Nyquist on the 1-tile
+  texel grid), called with the distance to the body contour (`ringR = max(dWhale, 0.0)`),
+  a whale shore width of `WHALE_SHORE_W = 2.5` tiles, and a proportionally shorter
+  shelf glow width `whaleShelfW = WHALE_SHORE_W * (uShelf / uShoreW)` (~4.06 tiles).
+  With the coast's ~6-tile wavelength, the 2.5-tile band shows one clean crest line
+  plus the wet-line edge and subtle shelf modulation. Everything is multiplied by
+  `surf` (from the depth ramp), so it fades in/out and never appears while diving
+  in open water.
 - Bounding-box early exit: the whole block is skipped unless
   `max(|p - whalePos|) < 16` tiles (half-length 5.5 + ring 2.5 + warp 3 with
   slack), which is a coherent branch on screen.
