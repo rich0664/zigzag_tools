@@ -10,3 +10,4 @@ form-structure.json
 
 # local browser automation artefacts
 .playwright-cli/
+__pycache__/
