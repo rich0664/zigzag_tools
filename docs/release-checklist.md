@@ -86,3 +86,15 @@ should align the shader's shoreline with the tile edge (cross-correlate the two
 renders; the correct one is at 0 shift). The half-texel change will shift the
 sea relative to the previous parity frames, so the sea reference images need a
 one-time refresh.
+
+## Decisions (2026-11-16)
+
+- **History:** clean snapshot import into `sea-zag-core`; the old repo keeps the full history and is tagged `pre-migration`.
+- **Source data:** Git LFS for the canonical inputs only — `out/sea/map.png`, `height_full.npy`, `full_interesting_v1.png`, `currents_uv.npy` (and optionally the prototype assets). Everything else in `out/` (dist fields, experiment renders, sheets) is derived and stays out of git.
+- **Public repo:** shipped artifacts only — `dist/sea-zag.user.js`, the assets, README, LICENSE, CHANGELOG. No source, no tools.
+- **Assets are not releases:** they live at stable paths in the public repo with their own `version` / `whaleVersion` query bumps. A map or look update is an assets-only workflow dispatch, never a tag. Script releases are `vX.Y.Z` tags.
+- **Public push:** direct push to `main` from the release workflow for now; no release PR. Revisit if a second look is wanted.
+- **Private main:** protected, PR + CI required; agents work on feature branches and open PRs.
+- **Rename:** the script becomes `sea-zag` (`@name`, `@namespace`, `dist/sea-zag.user.js`, asset names). Pre-release testers uninstall the old "zig~zag sea depth" script once, because Tampermonkey treats the rename as a new script.
+- **Sequence:** finish the basic whale → snapshot-migrate → stand up CI + deploy key + release workflow → dry-run the pipeline → finish whale polish and these checklist items in the private repo → public release.
+- **Agent PAT:** private Contents RW, Pull requests RW (if agents open PRs), Workflows RW while setting up Actions; Administration on the public repo only for deploy-key setup.
