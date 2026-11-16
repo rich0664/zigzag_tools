@@ -31,7 +31,7 @@ ellipsoid beyond the first pass.
 - The sea's world is texture-row tiles; `p` is the snapped texel-centre sample,
   `world` the continuous position. The whale **moves on `world`** (continuous,
   smooth) and is **rendered on a texel grid anchored to itself**: its local body
-  coordinates are quantised to ~1-tile cells, so it is a 5-6 × 2-3 block pixel
+  coordinates are quantised to ~1-tile cells, so it is a 5-6 × 2-3 block 3D
   creature whose blocks travel with it. It is **not** snapped to the map grid —
   that would step one tile at a time. The ring uses the same local cell grid.
 
@@ -68,12 +68,17 @@ ellipsoid beyond the first pass.
 ## Time and sync
 
 - The clock is derived from a network reading when possible, with the local
-  clock as the fallback. At startup a same-origin `HEAD` to the current page
-  reads the `Date` header; with `performance.now()` timestamps around the
-  request, the server's "now" is taken as the header value plus half the round
-  trip. The `Date` header has 1 s resolution, so the total error is under a
-  second — under two tiles of travel at full speed, and invisible. No
-  third-party API, no CORS, one tiny request.
+  clock as the fallback. At startup a same-origin `HEAD` to a **cheap static
+  asset** (`/logos/logoicon.webp`, not the SPA route — the app's TTFB is
+  2-9 s, which would always blow the timeout) reads the `Date` header; with
+  `performance.now()` timestamps around the request, the server's "now" is the
+  header value plus half the round trip. The `Date` header has 1 s resolution,
+  so the total error is under a second — under two tiles of travel at full
+  speed. No third-party API, no CORS, one tiny request.
+- Cross-client acceptance: for the same `t`, the sampler is deterministic
+  (pinned tests); across clients the phase is bounded by the `Date`
+  resolution (~1 s ≈ 1.6 tiles at cruising speed). That is accepted for an
+  easter egg; a sub-second source would be a different decision.
 - The offset is anchored once: `wallOffsetSec = serverNow - performance.now()/1000`,
   and the live whale time is `wallOffsetSec + performance.now()/1000`. Motion is
   monotonic and rAF-smooth; the offset keeps every client on the same wall
@@ -196,13 +201,15 @@ trim all apply consistently and tiles occlude it on land.
   for the continuous seabed that shifts an off-centre object by tens of tiles,
   clips it against the 12-tile bounding-box gate, and distorts its size with
   zoom.
-- **Sprite-grid rendering (smooth motion, blocky pixels):** the body's local
-  coordinates are quantised to a cell grid anchored to the whale
+- **Whale-anchored cell grid (smooth motion, blocky 3D shading):** the body's
+  local coordinates are quantised to a cell grid anchored to the whale
   (`lq = (floor(local / cell) + 0.5) * cell`, cell ≈ 1 tile); the ellipse,
-  `zTop`, normal and the hard mask are evaluated from `lq`. The pose itself
-  stays continuous, so the whole block pattern translates smoothly instead of
-  stepping with the map grid. The body's pixels are ~1-tile blocks; shading,
-  waterline and fog are flat per cell. The ring uses `lq` too.
+  `zTop`, a per-cell 3D normal and the hard mask are evaluated from `lq`. The
+  pose itself stays continuous, so the whole block pattern translates smoothly
+  instead of stepping with the map grid. Each ~1-tile cell has its own normal
+  and Lambert + small-specular shading, so the body reads as a chunky but shaded
+  3D creature, not two flat colours per cell; the waterline and fog weights are
+  per cell. The ring uses `lq` too.
 
 ### Fog and the ring
 
