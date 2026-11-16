@@ -24,6 +24,12 @@ describe('sea bundle', () => {
     assert.match(src, /function modeSettings\(/);
   });
 
+  it('contains the whale core after the sea core and before the shader', () => {
+    assert.match(src, /function parseWhaleRoute\(/);
+    assert.ok(src.indexOf('/* ---- whale-core.js ---- */') > src.indexOf('/* ---- sea-core.js ---- */'));
+    assert.ok(src.indexOf('/* ---- whale-core.js ---- */') < src.indexOf('/* ---- sea-glsl.js ---- */'));
+  });
+
   it('strips exports and the JSON import', () => {
     assert.doesNotMatch(src, /^\s*export /m);
     assert.doesNotMatch(src, /from '\.\/sea-consts\.json'/);
@@ -59,7 +65,7 @@ describe('sea bundle', () => {
     const close = src.lastIndexOf('\n})();');
     assert.ok(open > 0, 'wrapper opener missing');
     assert.ok(close > open, 'wrapper footer missing');
-    for (const decl of ['const seaConsts = {', 'function modeSettings(', 'function mountSeaUi(', 'const clamp =']) {
+    for (const decl of ['const seaConsts = {', 'function modeSettings(', 'function parseWhaleRoute(', 'function mountSeaUi(', 'const clamp =']) {
       const at = src.indexOf(decl);
       assert.ok(at > open && at < close, `${decl} is not inside the IIFE`);
     }
