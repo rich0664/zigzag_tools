@@ -242,6 +242,13 @@ only the draw.
 No sprite sheet or texture atlas: the low-res look comes from the render
 resolution, not from flattening the body.
 
+**Prototype mirror.** The whale is developed in `src/sea-glsl.js` only. The
+standalone prototype page (`prototype/sea-shader/index.html`) copies that block
+verbatim — same uniforms, constants and shading — once it is final, adding only
+sliders and a time control so the look can be watched in motion. It never
+develops its own whale; tuned values are ported back into the shipped
+constants.
+
 ## Performance and robustness
 
 - Two `vec4` uniforms per frame; no per-frame GL state beyond them.
