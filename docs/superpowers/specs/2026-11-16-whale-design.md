@@ -64,7 +64,7 @@ ellipsoid beyond the first pass.
 - Smooth arcs, roaming everywhere between islands; not a lap or a crossing.
 - Follow the currents; speed varies with them.
 - Surface breaks use the same wave effect as the coast.
-- Body ~5-6 texels long, 2.5-3 across; final body is depth-bearing
+- Body ~11 texels long, ~5 across the narrow axis; final body is depth-bearing
   (a 3D mesh, not a sprite); the prototype is an ellipsoid stand-in with the same contract.
 
 ## Time and sync
@@ -188,8 +188,8 @@ trim all apply consistently and tiles occlude it on land.
 - Origin at the body centre; `+X` forward along `heading`, `+Y` across,
   `+Z` up toward the sky in tiles with the waterline at world Z = 0. A body point
   at local height `z` sits at `Zworld = z - whaleDepth`.
-- Prototype geometry: a triaxial ellipsoid, half-length 2.75, half-width 1.35,
-  vertical radius 1.35 tiles (5.5 × 2.7 × 2.7). Two `vec4` uniforms:
+- Prototype geometry: a triaxial ellipsoid, half-length 5.5, half-width 2.5,
+  vertical radius 2.5 tiles (11 × 5 × 5, ~11 × 5 texels on the sea grid). Two `vec4` uniforms:
   `uWhalePose = (x, y, heading, depth)` and
   `uWhaleShape = (halfLen, halfWid, surf, enabled)`.
 - Height over the body: `zTop = Rz*sqrt(1 - r²)`, so the waterline is the exact
@@ -201,7 +201,7 @@ trim all apply consistently and tiles occlude it on land.
   a deep body refracts with the surface waves. Do **not** apply `parShift` to
   the whale: `parShift` is a view-centre radial scale (`(uTarget - world) * k`)
   for the continuous seabed that shifts an off-centre object by tens of tiles,
-  clips it against the 12-tile bounding-box gate, and distorts its size with
+  clips it against the 16-tile bounding-box gate, and distorts its size with
   zoom.
 - **Map-grid texel rendering (continuous pose, pixel-aligned 3D body):** the
   analytic body is sampled at `p` (the sea's texel centres); the ellipse,
@@ -231,7 +231,8 @@ trim all apply consistently and tiles occlude it on land.
   (from the depth ramp), so it fades in/out and never appears while diving in
   open water.
 - Bounding-box early exit: the whole block is skipped unless
-  `max(|p - whalePos|) < 12` tiles, which is a coherent branch on screen.
+  `max(|p - whalePos|) < 16` tiles (half-length 5.5 + ring 2.5 + warp 3 with
+  slack), which is a coherent branch on screen.
 
 ### Debug seams
 
