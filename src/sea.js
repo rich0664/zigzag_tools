@@ -76,6 +76,7 @@
     glReady: false, error: null, loading: false, moving: false,
     colourFormat: null,            // 'avif' or 'webp', whichever decoded
     canUseShader, maxTextureSize: probe.maxTextureSize,
+    whalePose: null,               // {x, y, depth, heading} or null (Task 4 feeds it)
   };
   window.__zzSea = state;
 
@@ -677,8 +678,12 @@
     'uDeflect', 'uDeflectReach', 'uTravelMax', 'uWarp', 'uWarpBias', 'uDirA', 'uDirB',
     'uSpeedA', 'uSpeedB', 'uScaleA', 'uScaleB', 'uParallax', 'uDeepSlow', 'uWaveIn',
     'uWaveOut', 'uPomLayers', 'uAlongScale', 'uBrightness', 'uNoiseLayers',
-    'uReveal',
+    'uReveal', 'uWhalePose', 'uWhaleShape',
   ];
+
+  // The prototype ellipsoid: 5.5 tiles long, 2.7 across. The shader fixes the
+  // vertical radius at 1.35; whaleUniforms adds the surf fade and the on flag.
+  const WHALE_SHAPE = { halfLen: 2.75, halfWid: 1.35 };
 
   // modeSettings().uniforms keys that set one float uniform unchanged; the
   // rest (par, pom, cycle, warp, adir, bdir) are transformed below.
@@ -1024,6 +1029,12 @@
     gl.uniform1f(uni.uAlongScale, seaConsts.alongScale);
     gl.uniform1f(uni.uBrightness, state.brightness);
     setModeUniforms(gl, uni, settings.uniforms);
+
+    // The whale is two vec4s: a pose and the shape/on gate. No pose packs a
+    // zeroed pose with on = 0, so the shader skips the block entirely.
+    const whale = whaleUniforms(state.whalePose, WHALE_SHAPE);
+    gl.uniform4fv(uni.uWhalePose, whale.pose);
+    gl.uniform4fv(uni.uWhaleShape, whale.shape);
 
     // intro ramps: the sea reveals by depth, the waves come in behind it, the
     // grain fades up with the reveal and the drift starts fast, settling to
@@ -1437,6 +1448,16 @@
 
     const canvas = glc.canvas;
     const prevW = canvas.width, prevH = canvas.height;
+    const prevPose = state.whalePose;
+    // Parity frames stay bit-identical: the whale is off unless this call pins
+    // it. `whale: true` keeps the pose supplied through setWhalePose; a pose
+    // object (or the task brief's `whalePose`) renders that pose for one frame.
+    const pin = opts.whale !== undefined ? opts.whale : opts.whalePose;
+    if (pin && typeof pin === 'object') {
+      setWhalePose(pin);
+    } else if (pin !== true) {
+      state.whalePose = null;
+    }
     // width/height are the camera extent in CSS-style pixels; extra-low renders
     // the same view into half the backing store, as the live tier does
     const settings = modeSettings(state.mode);
@@ -1473,6 +1494,7 @@
       ctx.putImageData(img, 0, 0);
       return out.toDataURL('image/png');
     } finally {
+      state.whalePose = prevPose;
       if (canvas.width !== prevW || canvas.height !== prevH) {
         canvas.width = prevW;
         canvas.height = prevH;
@@ -1637,6 +1659,22 @@
     return setAdaptiveFps(on);
   }
 
+  // Direct pose hook for the shader checks: accepts {x, y, depth, heading} in
+  // texture-row tiles/radians, or null/undefined to turn the whale off. The
+  // live route sampler (Task 4) writes the same state field every frame.
+  function setWhalePose(pose) {
+    if (!pose || typeof pose !== 'object') {
+      state.whalePose = null;
+      return state.whalePose;
+    }
+    const p = {
+      x: Number(pose.x), y: Number(pose.y),
+      depth: Number(pose.depth), heading: Number(pose.heading),
+    };
+    state.whalePose = [p.x, p.y, p.depth, p.heading].every(isFinite) ? p : null;
+    return state.whalePose;
+  }
+
   // Toggling the sea off stops both loops and hides the live canvas; toggling
   // it back on reuses the current mode (a deferred animated build happens here
   // when startup was off, so a sea that is off never loads the textures).
@@ -1678,6 +1716,7 @@
   state.setBrightness = setBrightness;
   state.setOpacity = setOpacity;
   state.setOn = setOn;
+  state.setWhalePose = setWhalePose;
 
   // ---- menu wiring and persistence ----------------------------------------
   // The menu reports a patch; this applies it, writes the zz-sea-* key and

@@ -32,6 +32,8 @@ uniform float uSpeedA, uSpeedB, uScaleA, uScaleB;
 uniform float uParallax, uDeepSlow, uWaveIn, uWaveOut, uPomLayers;
 uniform float uAlongScale, uBrightness, uNoiseLayers;
 uniform float uReveal;          // 0..1 depth-masked intro (deep water first)
+uniform vec4 uWhalePose;        // x, y, heading (rad), depth (tiles below water)
+uniform vec4 uWhaleShape;       // half length, half width, surface fade, enabled
 
 // ---- map border -------------------------------------------------------------
 // Everything here is in map texels (one texel per cell), so the trim scales
@@ -317,6 +319,80 @@ void main() {
             deep * 0.55 * wet);
   float swell = fbm(p * 0.018 + vec2(uTime * 0.015, 13.0)) - 0.5;
   col *= 1.0 + swell * uSwell * deep * wet;
+
+  // ---- whale ---------------------------------------------------------------
+  // One ellipsoid body in texture-row tiles. The 12-tile box keeps the whole
+  // block off all but a few hundred pixels, and the on flag keeps it out of
+  // the sea entirely when no pose is supplied.
+  vec2 whaleBox = abs(world - uWhalePose.xy);
+  if (uWhaleShape.w > 0.5 && max(whaleBox.x, whaleBox.y) < 12.0) {
+    float whaleDepth = uWhalePose.w;
+
+    // A body at depth refracts with the surface; at depth 0 it is anchored to
+    // the surface, so a breach has no warp and no parallax.
+    float whaleD01 = clamp(whaleDepth / 14.0, 0.0, 1.0);
+    vec2 wq = world + warp * whaleD01 + parShift(world, whaleD01 * 0.35);
+
+    // Local frame: +X along the heading, +Y across it.
+    vec2 rel = wq - uWhalePose.xy;
+    float hc = cos(uWhalePose.z), hs = sin(uWhalePose.z);
+    vec2 wl = vec2(rel.x * hc + rel.y * hs, -rel.x * hs + rel.y * hc);
+
+    float halfLen = uWhaleShape.x;
+    float halfWid = uWhaleShape.y;
+    float Rz = 1.35;
+    float r2 = (wl.x * wl.x) / (halfLen * halfLen)
+             + (wl.y * wl.y) / (halfWid * halfWid);
+    float zBody = Rz * sqrt(max(0.0, 1.0 - r2));   // local top surface
+    float zTop = zBody - whaleDepth;               // Z = 0 is the waterline
+    float bodyMask = 1.0 - smoothstep(0.985, 1.0, r2);
+
+    // Top-surface normal of the triaxial ellipsoid, lit from the NW.
+    vec3 nrm = normalize(vec3(wl.x / (halfLen * halfLen),
+                              wl.y / (halfWid * halfWid),
+                              zBody / (Rz * Rz) + 1e-4));
+    vec3 lightDir = normalize(vec3(-0.55, 0.65, 0.75));
+    float lam = max(dot(nrm, lightDir), 0.0);
+    vec3 bodyCol = mix(vec3(0.09, 0.13, 0.17), vec3(0.46, 0.57, 0.65),
+                       0.30 + 0.70 * lam);
+
+    // Submerged: fog toward the shaded sea colour and pass the surface grain
+    // over it. Breached: the body sits above the grain.
+    float submerged = max(0.0, -zTop);
+    float fog = 1.0 - exp(-submerged * 0.22);
+    float breach = smoothstep(0.0, 0.30, zTop);
+    float gWhale = (1.0 + (n * 1.2 + grainN * 0.16) * uGrain * 1.2 * onWater
+                          * (1.0 - 0.45 * deep))
+                 * (1.0 + dither * uGrain * 0.25 * onWater);
+    bodyCol = mix(bodyCol, col, fog);
+    bodyCol = mix(bodyCol * gWhale, bodyCol, breach);
+    // The waterline itself: a thin wet band where the top surface crosses Z=0.
+    float wetBand = (1.0 - smoothstep(0.0, 0.75, abs(zTop))) * uWhaleShape.z;
+    bodyCol = mix(bodyCol, vec3(0.62, 0.84, 0.98), wetBand * 0.55 * uFoam);
+    col = mix(col, bodyCol, bodyMask);
+
+    // ---- surface ring -------------------------------------------------------
+    // Signed distance from the ellipse contour, in tiles.
+    float dWhale = (r2 - 1.0)
+      / max(2.0 * length(vec2(wl.x / (halfLen * halfLen),
+                              wl.y / (halfWid * halfWid))), 1e-4);
+    float ringR = max(dWhale, 0.0);
+    // Outbound swell only: no inbound crest, no shelf glow. The wobble is
+    // quarter strength so it cannot tear a ring only two tiles wide.
+    float wobW = (fbm(p * 0.14 + 31.0) - 0.5) * 2.2;
+    float phOutW = (fbm(p * 0.055 + 23.0) - 0.5) * 6.2832;
+    float wOutW = sin((ringR + wobW * 0.25) * 0.74
+                      - uTime * uWaveSpeed * 0.63 + phOutW);
+    float cOutW = smoothstep(0.10, 0.90, wOutW) * 0.55;
+    float ring = (1.0 - smoothstep(0.0, 2.0, ringR)) * step(0.0, dWhale);
+    // Foam hugs the waterline; the same sea alpha/reveal gates it.
+    float wetW = 1.0 - smoothstep(0.0, 0.75, abs(zTop));
+    float dqW = floor(depth01 * 255.0 + 0.5) / 255.0;
+    float thrW = 1.25 - 1.55 * uReveal;
+    float revealW = smoothstep(thrW - 0.02, thrW + 0.02, dqW);
+    col += vec3(0.58, 0.80, 0.94) * cOutW * ring * wetW
+         * uWhaleShape.z * uFoam * revealW;
+  }
 
   col *= uBrightness;   // sea colour only: the border below overrides it
 
