@@ -8,21 +8,28 @@ The route is a fixed-dt loop of the exact binary `src/whale-core.js` parses:
     16-byte header  <IHHIHH : magic, version, dtSec, count, maxDepth, seed
     8-byte records  <HHBB   : x*8, y*8, depth*16, pad
 
-Rows are the `.npy` rows: row 0 is south, and nothing here flips them. A 1 s
-steering particle is integrated over 7 days through the map's own distance,
-seabed depth and the LOD current field the shader samples (deflect 1.0 / reach
-50 over the coarse 16-tile gyre, the same code as tools/bake_shader_assets.py).
-Records are written every dtSec.
+Rows are the `.npy` rows: row 0 is south, and nothing here flips them.
 
-Coverage comes from 80-120 blue-noise waypoints on the largest deep basin, in a
-nearest-neighbour cycle. Legs that cannot see each other are joined by a BFS
-path on a 24-tile open-water grid and string-pulled, so the guide itself never
-crosses a shelf or an island. The particle follows the guide with a pure-pursuit
-lookahead, while current, inertia, a low-frequency wander and a coastal-tangent
-/ deep-water potential steer it.
+Validity is the spec's hard mask: distance >= 28 tiles, seabed depth >= 0.30,
+not land, and a 60-tile map margin. The owner's ruling (2026-11-16) moved the
+seabed gate from 0.35 to 0.30: at 0.30 the deep mask is one component with
+20.25M tiles (53.5 % of the map, 92.9 % of the mask, bbox 0.98 x 0.97), whereas
+0.35 fragments it into basins (largest 67.5 % of the mask). 0.35 is still the
+soft preference: the potential and the surface windows prefer it, but it never
+walls off a reachable basin.
 
-The loop closes with a homing pull to the start plus a 120 s quintic Hermite
-bridge (C2 at both ends, so the sampled turn rate has no corner spike).
+The current shipped geometry is a radial rosette inside the largest inscribed
+safe circle of D >= 75 / seabed >= 0.48 water (r 256-300 tiles, 1,772 tiles,
+539 laps). It passes every hard gate but covers only 2.4 % of the deep
+512-tile cells; the map-wide 80-120 waypoint tour is *not* solved yet (see
+.superpowers/sdd/2026-11-16-whale/task-2-report.md). A free-steering particle
+either parks on the seabed contour or leaves the mask; the planned fix is a
+non-retracing kinematic corridor follower on the 0.30 mask.
+
+The body moves at 1 s along the guide at the committed current-speed formula
+(V0 = 1.75 tiles/s, current alignment), capped by guide curvature so the sampled
+turn rate stays under 0.015 rad/s. A 120 s quintic Hermite bridge (C2 at both
+ends) closes the seam.
 
 `--check` re-samples the *stored* route at every second (Catmull-Rom, wrapping,
 exactly like whale-core.js), so the deep-water, turn-rate and current gates see
@@ -67,9 +74,10 @@ MARGIN = 60.0                 # tiles kept clear of the map border
 NAV_MARGIN = 120.0            # guide stays further inside than the hard gate
 D_MIN = 28.0                  # hard deep-water gate (outside the 26-tile shelf)
 D_SAFE = 45.0                 # surface windows and the steering potential
-DEPTH_MIN = 0.35              # seabed depth gate
+DEPTH_MIN = 0.30              # hard seabed validity gate (owner ruling)
+SURF_DEPTH = 0.35             # surface/soft preference
 SAFE_D = 40.0                 # integration envelope, above the 28-tile gate
-SAFE_DEP = 0.38               # integration envelope, above the 0.35 gate
+SAFE_DEP = 0.38               # integration envelope, above the 0.30 gate
 HARD_D = 29.5                 # never step below this (gate 28 + Catmull margin)
 HARD_DEP = 0.352              # never step below this (gate 0.35 + margin)
 TURN_MAX = 0.015              # sampled gate
@@ -1073,7 +1081,7 @@ def check_route(g, rec, design_depth, raw, raw2, path, bridge_start):
                      f"(pre {pre:.2f}/{pre15:.2f}, post {post:.2f}/{post15:.2f})")
     # every second with the ring visible (depth < 1.5) is open water, both on
     # the designed profile and on the asset's 20 s decimation
-    open_s = (dist_s > D_SAFE) & (dep_s > DEPTH_MIN) & ~land_s
+    open_s = (dist_s > D_SAFE) & (dep_s > SURF_DEPTH) & ~land_s
     for label, dd in (("design", design_depth), ("baked", depth)):
         ring = dd < 1.5
         if not open_s[ring].all():
@@ -1081,7 +1089,7 @@ def check_route(g, rec, design_depth, raw, raw2, path, bridge_start):
             sys.exit(f"surface ({label}): depth {dd[k]:.2f} at t={k}s is not "
                      f"open water (D={dist_s[k]:.1f}, seabed {dep_s[k]:.3f})")
         log(f"surface ({label}): {int(ring.sum())} ring-visible seconds, all in "
-            f"open water (D > {D_SAFE:.0f}, seabed > {DEPTH_MIN})")
+            f"open water (D > {D_SAFE:.0f}, seabed > {SURF_DEPTH})")
 
     # current-direction agreement with the shipped textures
     flow = decode_tex(Image.open(FLOW_PATH).convert("RGB"))
@@ -1207,7 +1215,7 @@ def build(out_path):
     sx, sy, _, _ = sample_records(rec0, LOOP_SEC)
     col = np.clip(np.floor(sx + 0.5).astype(np.int64), 0, g.W - 1)
     row = np.clip(np.floor(sy + 0.5).astype(np.int64), 0, g.H - 1)
-    open_pos = (g.dist[row, col] > D_SAFE) & (g.dep[row, col] > DEPTH_MIN)
+    open_pos = (g.dist[row, col] > D_SAFE) & (g.dep[row, col] > SURF_DEPTH)
     depths, events = depth_design(LOOP_SEC, open_pos,
                                   np.random.default_rng(SEED + 2))
     rec = to_records(sim["x"], sim["y"], depths)
