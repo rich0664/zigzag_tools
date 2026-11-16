@@ -343,6 +343,11 @@ const float BORDER_BLACK_OUT = 1.0;
 // Only normalises the whale's surface coupling; the shader never sees maxDepth.
 const float WHALE_MAX_DEPTH = 14.0;
 
+// Whale ring shore width, in tiles. The coast's uShoreW is ~16; this short
+// band gets the same number of crests by scaling the wave frequency and the
+// wobble noise. Easy to tune.
+const float WHALE_SHORE_W = 2.5;
+
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
@@ -415,6 +420,66 @@ vec2 parShift(vec2 w, float depth) {
 vec2 parPos(vec2 p, float dep) {
   vec2 w = p + parShift(p, dep);
   return mix(w, floor(w) + 0.5, uSnap);
+}
+
+// ---- shore waves ------------------------------------------------------------
+// One model for the coast's wave/foam band. The whale ring calls the same
+// function with a short width and scaled frequencies, so it reads as a
+// miniature shoreline instead of a different effect. Distances are in tiles.
+struct ShoreParams {
+  vec2 p;            // noise position (map texels)
+  vec2 flow;         // current direction
+  float travel;      // one cycle's advection distance
+  float ph1, ph2;    // the two advection phases
+  float w1, w2;      // their cross-fade weights
+  float d;           // distance to the shore/contour
+  float w;           // shore width
+  float shelfW;      // shelf glow width
+  float wetMul;      // 1 in water; the coast passes its wet mask
+  float freq;        // spatial frequency multiplier
+  float noiseScale;  // noise-domain multiplier
+  float wobScale;    // wobble amplitude multiplier
+  float breakupAmp;  // 1 = full coast breakup
+};
+struct ShoreWaves {
+  float crest;       // inbound + outbound crest, before the shore mask
+  float shore;       // 1 at the shore, 0 at the shore width
+  float edge;        // thin wet-line mask (already wet-scaled)
+  float lap;         // wet-line breakup factor
+  float shelf;       // shelf glow modulation (already wet-scaled)
+};
+ShoreWaves shoreWaves(ShoreParams s) {
+  vec2 n1 = s.p * s.noiseScale;
+  vec2 wet1 = (s.p - s.flow * (s.travel * 0.30 * s.ph1)) * s.noiseScale;
+  vec2 wet2 = (s.p - s.flow * (s.travel * 0.30 * s.ph2)) * s.noiseScale;
+  vec2 sh1 = (s.p - s.flow * (s.travel * 0.40 * s.ph1)) * s.noiseScale;
+  vec2 sh2 = (s.p - s.flow * (s.travel * 0.40 * s.ph2)) * s.noiseScale;
+  float lap2 = fbm(wet1 * 0.90 + 17.0) * s.w1
+             + fbm(wet2 * 0.90 + 17.0) * s.w2;
+  // Wobble the isolines so crests wander; the amplitude shrinks with the
+  // shore width so it cannot tear a short ring.
+  float wob = (fbm(n1 * 0.14 + 31.0) - 0.5) * 2.2 * s.wobScale;
+  float breakupRaw = smoothstep(0.05, 0.60, fbm(n1 * 0.05 + 5.0));
+  float breakup = breakupRaw;
+  if (s.breakupAmp < 1.0) breakup = mix(1.0, breakupRaw, s.breakupAmp);
+  // Two trains: one runs in, one runs out, with separate wavelengths, speeds
+  // and slow phase offsets so the cycles are not in lockstep.
+  float phIn = (fbm(n1 * 0.045 + 7.0) - 0.5) * 6.2832;
+  float phOut = (fbm(n1 * 0.055 + 23.0) - 0.5) * 6.2832;
+  float wIn = sin((s.d * s.freq + wob) * 1.05
+                  + uTime * uWaveSpeed + phIn);
+  float wOut = sin((s.d * s.freq + wob * 1.3) * 0.74
+                   - uTime * uWaveSpeed * 0.63 + phOut);
+  float cIn = pow(max(wIn, 0.0), 3.0);
+  float cOut = smoothstep(0.10, 0.90, wOut) * 0.55;
+  float crest = (cIn * uWaveIn + cOut * uWaveOut) * breakup;
+  float edge = (1.0 - smoothstep(0.0, 0.85, s.d)) * s.wetMul;
+  float lap = 0.30 + 0.95 * smoothstep(0.34, 0.80, lap2);
+  float shore = 1.0 - smoothstep(0.0, s.w, s.d);
+  float shelfMask = 1.0 - smoothstep(0.0, s.shelfW, s.d);
+  float shelfN = fbm(sh1 * 0.12 + 3.0) * s.w1
+               + fbm(sh2 * 0.12 + 3.0) * s.w2 - 0.5;
+  return ShoreWaves(crest, shore, edge, lap, shelfN * (shelfMask * s.wetMul));
 }
 
 void main() {
@@ -564,39 +629,20 @@ void main() {
 
   // ---- shore: wave crests travel in towards land ----
   // distance isolines are parallel to the coast, so advancing the phase makes
-  // each crest move to a smaller d: waves breaking on the shore
-  float shore = (1.0 - smoothstep(0.0, uShoreW, d)) * wet;
-  float lap2 = fbm((p - flow * (cycleTravel * 0.30 * ph1)) * 0.90 + 17.0) * w1
-             + fbm((p - flow * (cycleTravel * 0.30 * ph2)) * 0.90 + 17.0) * w2;
-  // wobble the isolines so the crests wander instead of tracing the contours,
-  // and let some stretches of coast break while others stay calm
-  float wob = (fbm(p * 0.14 + 31.0) - 0.5) * 2.2;
-  float breakup = smoothstep(0.05, 0.60, fbm(p * 0.05 + 5.0));
-  // two trains: one runs in, one runs out, with separate wavelengths, speeds
-  // and a slow phase offset along the coast so the cycles are not in lockstep
-  float phIn = (fbm(p * 0.045 + 7.0) - 0.5) * 6.2832;
-  float phOut = (fbm(p * 0.055 + 23.0) - 0.5) * 6.2832;
-  float wIn = sin((d + wob) * 1.05 + uTime * uWaveSpeed + phIn);
-  float wOut = sin((d + wob * 1.3) * 0.74 - uTime * uWaveSpeed * 0.63 + phOut);
-  // keep them separate: summing the sines first leaves one moving beat, and the
-  // stronger train owns the visible crest
-  // inbound is a sharp crest; outbound is a broad swell, so the eye can tell
-  // the two directions apart even while they interfere
-  float cIn = pow(max(wIn, 0.0), 3.0);
-  float cOut = smoothstep(0.10, 0.90, wOut) * 0.55;
-  float crest = (cIn * uWaveIn + cOut * uWaveOut) * breakup;
-  col += vec3(0.58, 0.80, 0.94) * crest * shore * uFoam;
+  // each crest move to a smaller d: waves breaking on the shore. The same
+  // model is used by the whale ring below.
+  ShoreWaves coast = shoreWaves(ShoreParams(
+    p, flow, cycleTravel, ph1, ph2, w1, w2,
+    d, uShoreW, uShelf, wet,
+    1.0, 1.0, 1.0, 1.0));
+  float shore = coast.shore * wet;
+  col += vec3(0.58, 0.80, 0.94) * coast.crest * shore * uFoam;
 
   // thin wet line on the first texel, broken by the same noise
-  float edge = (1.0 - smoothstep(0.0, 0.85, d)) * wet;
-  col += vec3(0.62, 0.84, 0.98) * edge
-       * (0.30 + 0.95 * smoothstep(0.34, 0.80, lap2)) * uFoam * 0.8;
+  col += vec3(0.62, 0.84, 0.98) * coast.edge * coast.lap * uFoam * 0.8;
 
   // the baked shelf glow breathes on its own, much wider than the wet line
-  float shelf = (1.0 - smoothstep(0.0, uShelf, d)) * wet;
-  float shelfN = fbm((p - flow * (cycleTravel * 0.40 * ph1)) * 0.12 + 3.0) * w1
-               + fbm((p - flow * (cycleTravel * 0.40 * ph2)) * 0.12 + 3.0) * w2 - 0.5;
-  col *= 1.0 + shelfN * shelf * uFoam * 1.1;
+  col *= 1.0 + coast.shelf * uFoam * 1.1;
 
   float grainN = fbm(q * 0.1 + 7.0) - 0.5;
   float dither = hash(floor(q)) - 0.5;
@@ -614,47 +660,63 @@ void main() {
   col *= 1.0 + swell * uSwell * deep * wet;
 
   // ---- whale ---------------------------------------------------------------
-  // One ellipsoid body in texture-row tiles. The 12-tile box is at most
-  // (24 * zoom)^2 pixels (48x48 at zoom 4), and the on flag keeps it out of
-  // the sea entirely when no pose is supplied.
-  vec2 whaleBox = abs(world - uWhalePose.xy);
-  if (uWhaleShape.w > 0.5 && max(whaleBox.x, whaleBox.y) < 12.0) {
+  // The pose is continuous, but the body and ring are sampled on the sea's own
+  // texel grid (p, uSnap = 1): each sea texel is fully body or not, shaded from
+  // the 3D normal at that texel's local point. The dither pattern picks the
+  // boundary texels, so sub-texel motion does not jump the whole body one tile.
+  vec2 whaleBox = abs(p - uWhalePose.xy);
+  if (uWhaleShape.w > 0.5 && max(whaleBox.x, whaleBox.y) < 16.0) {
     float whaleDepth = uWhalePose.w;
 
     // A body at depth refracts with the surface; at depth 0 it is anchored to
     // the surface, so a breach has no warp. No parShift: that is a view-centre
     // radial scale for the continuous seabed and would move an off-centre
-    // whale out of the 12-tile gate.
+    // whale out of the 16-tile gate.
     float whaleD01 = clamp(whaleDepth / WHALE_MAX_DEPTH, 0.0, 1.0);
-    vec2 wq = world + clamp(warp * whaleD01, vec2(-3.0), vec2(3.0));
+    vec2 wq = p + clamp(warp * whaleD01, vec2(-3.0), vec2(3.0));
 
-    // Local frame: +X along the heading, +Y across it.
+    // Local frame from the continuous pose: +X along the heading, +Y across.
+    // The ellipse rotates with the heading; the sampling grid does not.
     vec2 rel = wq - uWhalePose.xy;
     float hc = cos(uWhalePose.z), hs = sin(uWhalePose.z);
     vec2 wl = vec2(rel.x * hc + rel.y * hs, -rel.x * hs + rel.y * hc);
 
     float halfLen = uWhaleShape.x;
     float halfWid = uWhaleShape.y;
-    float Rz = 1.35;
+    float Rz = 2.5;
     float r2 = (wl.x * wl.x) / (halfLen * halfLen)
              + (wl.y * wl.y) / (halfWid * halfWid);
-    float zBody = Rz * sqrt(max(0.0, 1.0 - r2));   // local top surface
+    float zBody = Rz * sqrt(max(0.0, 1.0 - r2));   // top surface at this texel
     float zTop = zBody - whaleDepth;               // Z = 0 is the waterline
-    // derivative-width edge: crisp at high zoom, stable when the body is tiny
-    float aaW = max(fwidth(r2), 1e-4);
-    float bodyMask = 1.0 - smoothstep(1.0 - aaW, 1.0, r2);
 
-    // Top-surface normal of the triaxial ellipsoid, lit from the NW.
+    // Signed distance to the ellipse in tiles. One map texel is one tile, so
+    // 0.5 - d is the analytic sub-texel coverage; the sea's existing dither
+    // picks the boundary texels. Hard per texel, never a smooth coverage ramp.
+    float dWhale = (r2 - 1.0)
+      / max(2.0 * length(vec2(wl.x / (halfLen * halfLen),
+                              wl.y / (halfWid * halfWid))), 1e-4);
+    float coverage = clamp(0.5 - dWhale, 0.0, 1.0);
+    // The epsilon matters: the sea's hash dither can be exactly 0, and
+    // step(0, 0) would body a texel far outside the ellipse.
+    float bodyMask = step(max(dither + 0.5, 1e-4), coverage);
+
+    // Per-texel 3D normal: a very low-resolution render of the ellipsoid, lit
+    // from the NW with Lambert plus a small top-down specular.
     vec3 nrm = normalize(vec3(wl.x / (halfLen * halfLen),
                               wl.y / (halfWid * halfWid),
                               zBody / (Rz * Rz) + 1e-4));
     vec3 lightDir = normalize(vec3(-0.55, 0.65, 0.75));
+    vec3 viewDir = vec3(0.0, 0.0, 1.0);
+    vec3 halfDir = normalize(lightDir + viewDir);
     float lam = max(dot(nrm, lightDir), 0.0);
+    float spec = pow(max(dot(nrm, halfDir), 0.0), 24.0) * 0.30;
     vec3 bodyCol = mix(vec3(0.09, 0.13, 0.17), vec3(0.46, 0.57, 0.65),
-                       0.30 + 0.70 * lam);
+                       0.30 + 0.70 * lam)
+                 + vec3(0.65, 0.82, 0.95) * spec;
 
     // Submerged: fog toward the shaded sea colour and pass the surface grain
-    // over it. Breached: the body sits above the grain.
+    // over it. Breached: the body sits above the grain. The fog and waterline
+    // weights are per texel like the shading.
     float submerged = max(0.0, -zTop);
     float fog = 1.0 - exp(-submerged * 0.22);
     float breach = smoothstep(0.0, 0.30, zTop);
@@ -669,22 +731,23 @@ void main() {
     col = mix(col, bodyCol, bodyMask);
 
     // ---- surface ring -------------------------------------------------------
-    // Signed distance from the ellipse contour, in tiles.
-    float dWhale = (r2 - 1.0)
-      / max(2.0 * length(vec2(wl.x / (halfLen * halfLen),
-                              wl.y / (halfWid * halfWid))), 1e-4);
+    // Same map texel grid and the same shore-wave model as the coast, with a
+    // 2.5-tile band. Frequencies and noise are scaled by the width ratio so the
+    // short ring shows the coast's crest count and relative wobble/breakup.
     float ringR = max(dWhale, 0.0);
-    // Reuse the sea's own outbound train (wob/phOut), quarter-strength wobble so
-    // it cannot tear a ring only two tiles wide; no inbound crest or shelf glow.
-    float wOutW = sin((ringR + wob * 0.25) * 0.74
-                      - uTime * uWaveSpeed * 0.63 + phOut);
-    float cOutW = smoothstep(0.10, 0.90, wOutW) * 0.55 * uWaveOut;
-    float ring = (1.0 - smoothstep(0.0, 2.0, ringR)) * step(0.0, dWhale);
-    // Foam hugs the waterline. The final fragment alpha applies the sea reveal
-    // to the body and this ring alike, so there is no second reveal here.
-    float wetW = 1.0 - smoothstep(0.0, 0.75, abs(zTop));
-    col += vec3(0.58, 0.80, 0.94) * cOutW * ring * wetW
-         * uWhaleShape.z * uFoam;
+    float whaleScale = WHALE_SHORE_W / uShoreW;
+    float whaleFreq = 1.0 / max(whaleScale, 1e-4);
+    float whaleShelfW = WHALE_SHORE_W * (uShelf / uShoreW);
+    ShoreWaves ringWaves = shoreWaves(ShoreParams(
+      p, flow, cycleTravel, ph1, ph2, w1, w2,
+      ringR, WHALE_SHORE_W, whaleShelfW, 1.0,
+      whaleFreq, whaleFreq, whaleScale, whaleScale));
+    float ringOn = 1.0 - bodyMask;
+    col += vec3(0.58, 0.80, 0.94) * ringWaves.crest * ringWaves.shore
+         * ringOn * uWhaleShape.z * uFoam;
+    col += vec3(0.62, 0.84, 0.98) * ringWaves.edge * ringWaves.lap
+         * ringOn * uWhaleShape.z * uFoam * 0.8;
+    col *= 1.0 + ringWaves.shelf * ringOn * uWhaleShape.z * uFoam * 1.1;
   }
 
   col *= uBrightness;   // sea colour only: the border below overrides it
@@ -1392,13 +1455,16 @@ function mountSeaUi(opts) {
   window.__zzSea = state;
 
   // ---- whale clock and route ----------------------------------------------
-  // The whale is a pure function of wall-clock time: a small HEAD to this page
-  // gives the server's Date, which anchors performance.now() to one clock for
-  // every client. The route is a separate tiny fetch requested only by the
-  // first animated build. Neither can fail the sea.
+  // The whale is a pure function of wall-clock time: a small HEAD to a cheap
+  // static asset gives the server's Date, which anchors performance.now() to
+  // one clock for every client. The route is a separate tiny fetch requested
+  // only by the first animated build. Neither can fail the sea.
   const CLOCK_TIMEOUT_MS = 1500;
   const CLOCK_EASE_MS = 2000;
   const CLOCK_JUMP_SEC = 1;
+  // Not the SPA route: the app's TTFB is 2-9 s and would always blow the 1.5 s
+  // deadline. This logo is a small, cacheable static asset.
+  const CLOCK_URL = '/logos/logoicon.webp';
 
   let whaleRoute = null;        // parsed route, cached across context restores
   let whaleLoad = null;         // an in-flight route load
@@ -1453,7 +1519,7 @@ function mountSeaUi(opts) {
     try {
       const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
       if (ctrl) timer = setTimeout(() => ctrl.abort(), CLOCK_TIMEOUT_MS);
-      fetch(location.href, {
+      fetch(CLOCK_URL, {
         method: 'HEAD',
         cache: 'no-store',
         signal: ctrl ? ctrl.signal : undefined,
@@ -2151,9 +2217,9 @@ function mountSeaUi(opts) {
     'uReveal', 'uWhalePose', 'uWhaleShape',
   ];
 
-  // The prototype ellipsoid: 5.5 tiles long, 2.7 across. The shader fixes the
-  // vertical radius at 1.35; whaleUniforms adds the surf fade and the on flag.
-  const WHALE_SHAPE = { halfLen: 2.75, halfWid: 1.35 };
+  // The prototype ellipsoid: 11 tiles long, 5 across. The shader's vertical
+  // radius is 2.5; whaleUniforms adds the surf fade and the on flag.
+  const WHALE_SHAPE = { halfLen: 5.5, halfWid: 2.5 };
 
   // modeSettings().uniforms keys that set one float uniform unchanged; the
   // rest (par, pom, cycle, warp, adir, bdir) are transformed below.

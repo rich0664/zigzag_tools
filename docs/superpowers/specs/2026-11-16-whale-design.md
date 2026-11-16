@@ -196,7 +196,7 @@ trim all apply consistently and tiles occlude it on land.
   contour where `zTop = whaleDepth`. A single line of GLSL more than a sphere,
   and it validates heading and the oblong ring immediately.
 - **Depth-scaled water coupling:** sample the body's position with
-  `wq = world + clamp(warp * depth01, vec2(-3.0), vec2(3.0))` (`depth01 = clamp(depth / 14.0, 0.0, 1.0)`),
+  `wq = p + clamp(warp * depth01, vec2(-3.0), vec2(3.0))` (`depth01 = clamp(depth / 14.0, 0.0, 1.0)`),
   so the breach at depth 0 is anchored to the water surface with no warp, while
   a deep body refracts with the surface waves. Do **not** apply `parShift` to
   the whale: `parShift` is a view-centre radial scale (`(uTarget - world) * k`)

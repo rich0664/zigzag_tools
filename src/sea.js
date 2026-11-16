@@ -81,13 +81,16 @@
   window.__zzSea = state;
 
   // ---- whale clock and route ----------------------------------------------
-  // The whale is a pure function of wall-clock time: a small HEAD to this page
-  // gives the server's Date, which anchors performance.now() to one clock for
-  // every client. The route is a separate tiny fetch requested only by the
-  // first animated build. Neither can fail the sea.
+  // The whale is a pure function of wall-clock time: a small HEAD to a cheap
+  // static asset gives the server's Date, which anchors performance.now() to
+  // one clock for every client. The route is a separate tiny fetch requested
+  // only by the first animated build. Neither can fail the sea.
   const CLOCK_TIMEOUT_MS = 1500;
   const CLOCK_EASE_MS = 2000;
   const CLOCK_JUMP_SEC = 1;
+  // Not the SPA route: the app's TTFB is 2-9 s and would always blow the 1.5 s
+  // deadline. This logo is a small, cacheable static asset.
+  const CLOCK_URL = '/logos/logoicon.webp';
 
   let whaleRoute = null;        // parsed route, cached across context restores
   let whaleLoad = null;         // an in-flight route load
@@ -142,7 +145,7 @@
     try {
       const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
       if (ctrl) timer = setTimeout(() => ctrl.abort(), CLOCK_TIMEOUT_MS);
-      fetch(location.href, {
+      fetch(CLOCK_URL, {
         method: 'HEAD',
         cache: 'no-store',
         signal: ctrl ? ctrl.signal : undefined,
@@ -840,9 +843,9 @@
     'uReveal', 'uWhalePose', 'uWhaleShape',
   ];
 
-  // The prototype ellipsoid: 5.5 tiles long, 2.7 across. The shader fixes the
-  // vertical radius at 1.35; whaleUniforms adds the surf fade and the on flag.
-  const WHALE_SHAPE = { halfLen: 2.75, halfWid: 1.35 };
+  // The prototype ellipsoid: 11 tiles long, 5 across. The shader's vertical
+  // radius is 2.5; whaleUniforms adds the surf fade and the on flag.
+  const WHALE_SHAPE = { halfLen: 5.5, halfWid: 2.5 };
 
   // modeSettings().uniforms keys that set one float uniform unchanged; the
   // rest (par, pom, cycle, warp, adir, bdir) are transformed below.
