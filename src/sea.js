@@ -1449,15 +1449,6 @@
     const canvas = glc.canvas;
     const prevW = canvas.width, prevH = canvas.height;
     const prevPose = state.whalePose;
-    // Parity frames stay bit-identical: the whale is off unless this call pins
-    // it. `whale: true` keeps the pose supplied through setWhalePose; a pose
-    // object (or the task brief's `whalePose`) renders that pose for one frame.
-    const pin = opts.whale !== undefined ? opts.whale : opts.whalePose;
-    if (pin && typeof pin === 'object') {
-      setWhalePose(pin);
-    } else if (pin !== true) {
-      state.whalePose = null;
-    }
     // width/height are the camera extent in CSS-style pixels; extra-low renders
     // the same view into half the backing store, as the live tier does
     const settings = modeSettings(state.mode);
@@ -1465,6 +1456,15 @@
     const bw = Math.max(1, Math.round(w * scale));
     const bh = Math.max(1, Math.round(h * scale));
     try {
+      // Parity frames stay bit-identical: the whale is off unless this call
+      // pins it. `whale: true` keeps the pose supplied through setWhalePose; a
+      // pose object (or the `whalePose` alias) renders it for this frame only.
+      const pin = opts.whale !== undefined ? opts.whale : opts.whalePose;
+      if (pin && typeof pin === 'object') {
+        setWhalePose(pin);
+      } else if (pin !== true) {
+        state.whalePose = null;
+      }
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.width = bw;
         canvas.height = bh;

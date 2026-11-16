@@ -50,6 +50,10 @@ const float BORDER_BLACK2 = 1.0;
 const float BORDER_LINE2 = 1.0;
 const float BORDER_BLACK_OUT = 1.0;
 
+// Deepest baked route depth (maxDepth = 222/16 = 13.875 tiles), rounded up.
+// Only normalises the whale's surface coupling; the shader never sees maxDepth.
+const float WHALE_MAX_DEPTH = 14.0;
+
 float hash(vec2 p) {
   p = fract(p * vec2(123.34, 456.21));
   p += dot(p, p + 45.32);
@@ -321,17 +325,19 @@ void main() {
   col *= 1.0 + swell * uSwell * deep * wet;
 
   // ---- whale ---------------------------------------------------------------
-  // One ellipsoid body in texture-row tiles. The 12-tile box keeps the whole
-  // block off all but a few hundred pixels, and the on flag keeps it out of
+  // One ellipsoid body in texture-row tiles. The 12-tile box is at most
+  // (24 * zoom)^2 pixels (48x48 at zoom 4), and the on flag keeps it out of
   // the sea entirely when no pose is supplied.
   vec2 whaleBox = abs(world - uWhalePose.xy);
   if (uWhaleShape.w > 0.5 && max(whaleBox.x, whaleBox.y) < 12.0) {
     float whaleDepth = uWhalePose.w;
 
     // A body at depth refracts with the surface; at depth 0 it is anchored to
-    // the surface, so a breach has no warp and no parallax.
-    float whaleD01 = clamp(whaleDepth / 14.0, 0.0, 1.0);
-    vec2 wq = world + warp * whaleD01 + parShift(world, whaleD01 * 0.35);
+    // the surface, so a breach has no warp. No parShift: that is a view-centre
+    // radial scale for the continuous seabed and would move an off-centre
+    // whale out of the 12-tile gate.
+    float whaleD01 = clamp(whaleDepth / WHALE_MAX_DEPTH, 0.0, 1.0);
+    vec2 wq = world + clamp(warp * whaleD01, vec2(-3.0), vec2(3.0));
 
     // Local frame: +X along the heading, +Y across it.
     vec2 rel = wq - uWhalePose.xy;
@@ -345,7 +351,9 @@ void main() {
              + (wl.y * wl.y) / (halfWid * halfWid);
     float zBody = Rz * sqrt(max(0.0, 1.0 - r2));   // local top surface
     float zTop = zBody - whaleDepth;               // Z = 0 is the waterline
-    float bodyMask = 1.0 - smoothstep(0.985, 1.0, r2);
+    // derivative-width edge: crisp at high zoom, stable when the body is tiny
+    float aaW = max(fwidth(r2), 1e-4);
+    float bodyMask = 1.0 - smoothstep(1.0 - aaW, 1.0, r2);
 
     // Top-surface normal of the triaxial ellipsoid, lit from the NW.
     vec3 nrm = normalize(vec3(wl.x / (halfLen * halfLen),
@@ -377,21 +385,17 @@ void main() {
       / max(2.0 * length(vec2(wl.x / (halfLen * halfLen),
                               wl.y / (halfWid * halfWid))), 1e-4);
     float ringR = max(dWhale, 0.0);
-    // Outbound swell only: no inbound crest, no shelf glow. The wobble is
-    // quarter strength so it cannot tear a ring only two tiles wide.
-    float wobW = (fbm(p * 0.14 + 31.0) - 0.5) * 2.2;
-    float phOutW = (fbm(p * 0.055 + 23.0) - 0.5) * 6.2832;
-    float wOutW = sin((ringR + wobW * 0.25) * 0.74
-                      - uTime * uWaveSpeed * 0.63 + phOutW);
-    float cOutW = smoothstep(0.10, 0.90, wOutW) * 0.55;
+    // Reuse the sea's own outbound train (wob/phOut), quarter-strength wobble so
+    // it cannot tear a ring only two tiles wide; no inbound crest or shelf glow.
+    float wOutW = sin((ringR + wob * 0.25) * 0.74
+                      - uTime * uWaveSpeed * 0.63 + phOut);
+    float cOutW = smoothstep(0.10, 0.90, wOutW) * 0.55 * uWaveOut;
     float ring = (1.0 - smoothstep(0.0, 2.0, ringR)) * step(0.0, dWhale);
-    // Foam hugs the waterline; the same sea alpha/reveal gates it.
+    // Foam hugs the waterline. The final fragment alpha applies the sea reveal
+    // to the body and this ring alike, so there is no second reveal here.
     float wetW = 1.0 - smoothstep(0.0, 0.75, abs(zTop));
-    float dqW = floor(depth01 * 255.0 + 0.5) / 255.0;
-    float thrW = 1.25 - 1.55 * uReveal;
-    float revealW = smoothstep(thrW - 0.02, thrW + 0.02, dqW);
     col += vec3(0.58, 0.80, 0.94) * cOutW * ring * wetW
-         * uWhaleShape.z * uFoam * revealW;
+         * uWhaleShape.z * uFoam;
   }
 
   col *= uBrightness;   // sea colour only: the border below overrides it
