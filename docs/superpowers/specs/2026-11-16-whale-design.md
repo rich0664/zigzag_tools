@@ -218,12 +218,16 @@ trim all apply consistently and tiles occlude it on land.
   over it, so it reads as under the water, not pasted on glass.
 - Breached body (`Zworld > 0`) and the waterline sit above the grain; brightness
   and the reveal mask still apply.
-- The ring reuses the shore wave **outbound** logic only — never the inbound
-  crest, shelf glow or full wobble. `dWhale` is the signed distance from the
-  body contour in tiles; `wob` is scaled to 0.25 so it cannot tear a 2-tile
-  ring; the wet-line foam is `1 - smoothstep(0, 0.75, |Zworld|)` on the
-  waterline. Everything is multiplied by `surf` (from the depth ramp), so it
-  fades in/out and never appears while diving in open water.
+- The ring is the **coast effect at a shorter scale**, not a different wave:
+  the same two trains (`uWaveIn`, `uWaveOut`), wet line, foam, wobble and
+  breakup, called with the distance to the body contour and a whale shore width
+  of ~2.5 tiles. The spatial frequencies and the wobble/breakup amplitude are
+  scaled by `whaleShore / uShoreW`, so the shorter band shows the same number of
+  crests and the same relative wobble as a shoreline (an unscaled wobble would
+  tear it). The shelf glow is included at the same short scale, or omitted if
+  it reads wrong; the test image decides. Everything is multiplied by `surf`
+  (from the depth ramp), so it fades in/out and never appears while diving in
+  open water.
 - Bounding-box early exit: the whole block is skipped unless
   `max(|p - whalePos|) < 12` tiles, which is a coherent branch on screen.
 
