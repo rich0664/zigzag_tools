@@ -54,6 +54,32 @@ const float BORDER_BLACK_OUT = 1.0;
 // Only normalises the whale's surface coupling; the shader never sees maxDepth.
 const float WHALE_MAX_DEPTH = 14.0;
 
+// How much of the map's depth palette tints the body: 0 = natural, 1 = a full
+// multiply. The owner asked for roughly 70-80%, not a complete recolour.
+const float WHALE_TINT = 0.7;
+
+// The map's depth palette (tools/sea_editor.py, preset "interesting_v1"): the
+// same ramp the seabed is coloured with, shallow light blue to deep near-black.
+// A change to that palette must be mirrored here.
+//   stops: 0.001, 0.03, 0.07, 0.12, 0.20, 0.32, 0.46, 0.66, 1.0
+//   cols:  74,126,156 / 58,104,134 / 45,86,116 / 35,70,98 / 28,57,82
+//          22,46,67 / 17,36,53 / 12,25,37 / 7,13,18
+// Each stop is a cumulative smoothstep mix, not a linear sample, so the ramp
+// has no visible kinks at the stops.
+vec3 depthRamp(float t) {
+  t = clamp(t, 0.0, 1.0);
+  vec3 c = vec3(74.0, 126.0, 156.0) / 255.0;
+  c = mix(c, vec3(58.0, 104.0, 134.0) / 255.0, smoothstep(0.001, 0.03, t));
+  c = mix(c, vec3(45.0, 86.0, 116.0) / 255.0, smoothstep(0.03, 0.07, t));
+  c = mix(c, vec3(35.0, 70.0, 98.0) / 255.0, smoothstep(0.07, 0.12, t));
+  c = mix(c, vec3(28.0, 57.0, 82.0) / 255.0, smoothstep(0.12, 0.20, t));
+  c = mix(c, vec3(22.0, 46.0, 67.0) / 255.0, smoothstep(0.20, 0.32, t));
+  c = mix(c, vec3(17.0, 36.0, 53.0) / 255.0, smoothstep(0.32, 0.46, t));
+  c = mix(c, vec3(12.0, 25.0, 37.0) / 255.0, smoothstep(0.46, 0.66, t));
+  c = mix(c, vec3(7.0, 13.0, 18.0) / 255.0, smoothstep(0.66, 1.0, t));
+  return c;
+}
+
 // Whale ring shore width, in tiles. The ring uses the coast's own wave
 // frequencies and noise (never a uShoreW / WHALE_SHORE_W ratio: 6.4x would put
 // the wavelength below one texel and alias on the 1-tile grid), so this short
@@ -428,6 +454,13 @@ void main() {
                           * (1.0 - 0.45 * deep))
                  * (1.0 + dither * uGrain * 0.25 * onWater);
     bodyCol = mix(bodyCol, col, fog);
+    // Depth tint from the map's own palette: darker blue with the whale's
+    // pose depth, and normalised at the surface so a breach is its natural
+    // colour (depthRamp(0.0) is the shallow stop and non-zero). Applied after
+    // the fog mix so a deep body stays the whale's shape in dark blue rather
+    // than picking up extra water colour.
+    vec3 tint = depthRamp(whaleD01) / max(depthRamp(0.0), vec3(1e-4));
+    bodyCol *= mix(vec3(1.0), tint, WHALE_TINT);
     bodyCol = mix(bodyCol * gWhale, bodyCol, breach);
     // The waterline itself: a thin wet band where the top surface crosses Z=0.
     float wetBand = (1.0 - smoothstep(0.0, 0.75, abs(zTop))) * uWhaleShape.z;
