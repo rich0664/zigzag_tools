@@ -377,4 +377,15 @@ describe('assetUrl', () => {
       `${seaConsts.assetBase}/zigzag-sea-dist.webp?v=${seaConsts.version}`,
     );
   });
+
+  it('accepts a version override for the whale route', () => {
+    assert.equal(
+      assetUrl('zigzag-whale.bin', 'https://example.test/dist', '1'),
+      'https://example.test/dist/zigzag-whale.bin?v=1',
+    );
+    assert.equal(
+      assetUrl('zigzag-whale.bin', undefined, seaConsts.whaleVersion),
+      `${seaConsts.assetBase}/zigzag-whale.bin?v=${seaConsts.whaleVersion}`,
+    );
+  });
 });

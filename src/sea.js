@@ -80,6 +80,165 @@
   };
   window.__zzSea = state;
 
+  // ---- whale clock and route ----------------------------------------------
+  // The whale is a pure function of wall-clock time: a small HEAD to this page
+  // gives the server's Date, which anchors performance.now() to one clock for
+  // every client. The route is a separate tiny fetch requested only by the
+  // first animated build. Neither can fail the sea.
+  const CLOCK_TIMEOUT_MS = 1500;
+  const CLOCK_EASE_MS = 2000;
+  const CLOCK_JUMP_SEC = 1;
+
+  let whaleRoute = null;        // parsed route, cached across context restores
+  let whaleLoad = null;         // an in-flight route load
+  let whaleEnabled = true;      // __zzSea.whale(false) disables it
+  let whalePinSec = null;       // frozen route time, or null for the wall clock
+  let clockSource = 'local';    // 'network' after a successful HEAD
+
+  // wall epoch = anchor + performance.now()/1000. Start on the local clock; a
+  // large late correction eases from the old anchor over 2 s.
+  let wallAnchorFrom = Date.now() / 1000 - performance.now() / 1000;
+  let wallAnchorTo = wallAnchorFrom;
+  let wallAnchorEaseStart = 0;
+  let wallAnchorEasing = false;
+
+  function wallAnchorAt(nowMs) {
+    if (!wallAnchorEasing) return wallAnchorTo;
+    const u = clamp((nowMs - wallAnchorEaseStart) / CLOCK_EASE_MS, 0, 1);
+    if (u >= 1) {
+      wallAnchorEasing = false;
+      wallAnchorFrom = wallAnchorTo;
+      return wallAnchorTo;
+    }
+    return wallAnchorFrom + (wallAnchorTo - wallAnchorFrom) * u;
+  }
+
+  function wallNow(nowMs) {
+    return wallAnchorAt(nowMs) + nowMs / 1000;
+  }
+
+  function setWallAnchor(anchorSec, source, immediate) {
+    if (!isFinite(anchorSec)) return;
+    const now = performance.now();
+    const current = wallAnchorAt(now);
+    clockSource = source;
+    if (immediate) {
+      wallAnchorFrom = wallAnchorTo = anchorSec;
+      wallAnchorEasing = false;
+      return;
+    }
+    // The Date header has second resolution; a sub-second correction is noise,
+    // and a larger one eases rather than teleporting the whale.
+    if (Math.abs(anchorSec - current) < CLOCK_JUMP_SEC) return;
+    wallAnchorFrom = current;
+    wallAnchorTo = anchorSec;
+    wallAnchorEaseStart = now;
+    wallAnchorEasing = true;
+  }
+
+  function anchorClock(immediate) {
+    const t0 = performance.now();
+    let timer = 0;
+    try {
+      const ctrl = typeof AbortController === 'function' ? new AbortController() : null;
+      if (ctrl) timer = setTimeout(() => ctrl.abort(), CLOCK_TIMEOUT_MS);
+      fetch(location.href, {
+        method: 'HEAD',
+        cache: 'no-store',
+        signal: ctrl ? ctrl.signal : undefined,
+      }).then(res => {
+        const t1 = performance.now();
+        const date = res.headers.get('Date');
+        const serverEpochSec = date ? Date.parse(date) / 1000 : NaN;
+        // The abort alone is not a hard deadline: a response whose headers
+        // landed just before it can still resolve. Treat anything past the
+        // timeout as a failure and keep the local clock.
+        if (!isFinite(serverEpochSec) || t1 - t0 > CLOCK_TIMEOUT_MS) {
+          throw new Error('clock: HEAD timeout or no Date header');
+        }
+        const localEpochSec = Date.now() / 1000;
+        const serverNow = localEpochSec
+          + clockOffset(serverEpochSec, t1 - t0, localEpochSec);
+        setWallAnchor(serverNow - t1 / 1000, 'network', immediate);
+      }).catch(() => {
+        // Keep the local (or previous) anchor; the whale still runs.
+      }).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    } catch {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  function loadWhale() {
+    if (whaleRoute) return Promise.resolve(whaleRoute);
+    if (whaleLoad) return whaleLoad;
+    try {
+      whaleLoad = fetch(assetUrl('zigzag-whale.bin', assetBase, seaConsts.whaleVersion))
+        .then(res => {
+          if (!res.ok) throw new Error(`whale route: HTTP ${res.status}`);
+          return res.arrayBuffer();
+        })
+        .then(buf => {
+          whaleRoute = parseWhaleRoute(buf);
+          return whaleRoute;
+        })
+        .catch(() => null)          // a failed route disables the whale only
+        .finally(() => { whaleLoad = null; });
+    } catch {
+      whaleLoad = null;
+    }
+    return whaleLoad || Promise.resolve(null);
+  }
+
+  function updateWhalePose(nowMs) {
+    if (state.mode === 'static' || !whaleEnabled || !whaleRoute) {
+      state.whalePose = null;
+      return;
+    }
+    const tSec = whalePinSec !== null ? whalePinSec : wallNow(nowMs);
+    setWhalePose(sampleWhale(whaleRoute, tSec));
+  }
+
+  function whaleStats() {
+    const p = state.whalePose;
+    return {
+      loaded: !!whaleRoute,
+      timeSource: clockSource,
+      x: p ? p.x : null,
+      y: p ? p.y : null,
+      depth: p ? p.depth : null,
+      heading: p ? p.heading : null,
+    };
+  }
+
+  // Debug clock/route controls: {t} freezes the route time, false hides the
+  // whale, null resumes the wall clock. Returns the same fields as stats().
+  function setWhale(arg) {
+    if (arg === false) {
+      whaleEnabled = false;
+      whalePinSec = null;
+      state.whalePose = null;
+      return whaleStats();
+    }
+    if (arg === null) {
+      whaleEnabled = true;
+      whalePinSec = null;
+      updateWhalePose(performance.now());
+      return whaleStats();
+    }
+    if (arg && typeof arg === 'object' && arg.t !== undefined) {
+      const t = Number(arg.t);
+      if (isFinite(t)) {
+        whaleEnabled = true;
+        whalePinSec = t;
+        updateWhalePose(performance.now());
+      }
+    }
+    return whaleStats();
+  }
+
+
   // The requested mode (menu choice / saved preference), kept across a
   // fallback so context restore and retry know what to rebuild.
   let wantedMode = startupMode;
@@ -867,6 +1026,10 @@
     state.loading = true;
     refreshUi();
 
+    // The whale route is a side load: outside the texture Promise.all, and a
+    // failure disables only the whale (never state.error or static fallback).
+    loadWhale();
+
     // A first load (or a retry after a failure) has no sea layer to show, so
     // put the noise up and run the depth reveal once the textures are in.
     // Later builds — a static→animated switch or a context-loss restore — keep
@@ -949,6 +1112,7 @@
     state.mode = 'static';
     state.sig = '';
     holdStatic = false;
+    state.whalePose = null;
     state.error = 'context lost' +
       (e && e.statusMessage ? ': ' + e.statusMessage : '');
     // The lost canvas still shows its last composited frame. Keep it visible
@@ -1134,6 +1298,9 @@
     }
     const ramps = liveRamps(now);
     const t0 = now;
+    // Live whale time comes from the wall clock anchor, or the debug pin. The
+    // shader's own uTime stays seconds since load (waves/reveal).
+    updateWhalePose(now);
     renderFrame(glc, w, h, {
       tx: target[0], ty: target[1],
       zoom: cam.zoomPx, zoomCss: cam.zoomPx / scale,
@@ -1216,6 +1383,7 @@
     state.mode = 'static';
     state.sig = '';
     holdStatic = false;
+    state.whalePose = null;
     if (glc && glc.lost) {
       // keep the lost canvas alive for webglcontextrestored; it stays visible
       // until the 2D path paints over it
@@ -1302,6 +1470,7 @@
       state.mode = 'static';
       state.sig = '';
       holdStatic = false;
+      state.whalePose = null;
       if (state.img) {
         try { drawStatic(); } catch (e) { state.error = errText(e); }
         startStatic();
@@ -1318,6 +1487,7 @@
     if (id === 'static') {
       state.error = null;
       state.loading = false;
+      state.whalePose = null;         // static draws no shader, so no whale
       enterStatic();
     } else {
       state.error = null;
@@ -1457,13 +1627,23 @@
     const bh = Math.max(1, Math.round(h * scale));
     try {
       // Parity frames stay bit-identical: the whale is off unless this call
-      // pins it. `whale: true` keeps the pose supplied through setWhalePose; a
-      // pose object (or the `whalePose` alias) renders it for this frame only.
-      const pin = opts.whale !== undefined ? opts.whale : opts.whalePose;
-      if (pin && typeof pin === 'object') {
-        setWhalePose(pin);
-      } else if (pin !== true) {
-        state.whalePose = null;
+      // pins it. `whaleT` samples the route at that time; `whale: true` keeps
+      // the pose supplied through setWhalePose; a pose object (or the
+      // `whalePose` alias) renders it for this frame only.
+      if (opts.whaleT !== undefined) {
+        const whaleT = Number(opts.whaleT);
+        if (!isFinite(whaleT)) {
+          throw new Error('debugRender needs a finite whaleT');
+        }
+        if (!whaleRoute) throw new Error('whale route not loaded');
+        setWhalePose(sampleWhale(whaleRoute, whaleT));
+      } else {
+        const pin = opts.whale !== undefined ? opts.whale : opts.whalePose;
+        if (pin && typeof pin === 'object') {
+          setWhalePose(pin);
+        } else if (pin !== true) {
+          state.whalePose = null;
+        }
       }
       if (canvas.width !== bw || canvas.height !== bh) {
         canvas.width = bw;
@@ -1546,11 +1726,13 @@
       try {
         // Warm up, then wait for the GPU so the clock measures work instead of
         // command submission.
+        updateWhalePose(performance.now());
         renderFrame(glc, sized.w, sized.h, frame, start / 1000, settings,
           liveRamps(start));
         syncGL(glc.gl);
         const t0 = performance.now();
         for (let i = 0; i < 60; i++) {
+          updateWhalePose(performance.now());
           renderFrame(glc, sized.w, sized.h, frame, start / 1000 + i / 60, settings,
             liveRamps(start));
         }
@@ -1600,6 +1782,7 @@
         colourFormat: state.colourFormat,
         firstLoad,
         introPending,
+        whale: whaleStats(),
       };
     }
     return {
@@ -1616,6 +1799,7 @@
       colourFormat: state.colourFormat,
       firstLoad,
       introPending,
+      whale: whaleStats(),
     };
   }
 
@@ -1717,6 +1901,7 @@
   state.setOpacity = setOpacity;
   state.setOn = setOn;
   state.setWhalePose = setWhalePose;
+  state.whale = setWhale;
 
   // ---- menu wiring and persistence ----------------------------------------
   // The menu reports a patch; this applies it, writes the zz-sea-* key and
@@ -1761,16 +1946,23 @@
 
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) { stopStatic(); stopGL(); hideNoise(0); }
-    else if (state.mode === 'static') {
-      if (!state.img) loadColour().catch(() => {});
-      startStatic();
-    } else {
-      if (holdStatic) startStatic();
-      startGL();
+    else {
+      anchorClock(false);            // re-anchor the whale clock after a sleep
+      if (state.mode === 'static') {
+        if (!state.img) loadColour().catch(() => {});
+        startStatic();
+      } else {
+        if (holdStatic) startStatic();
+        startGL();
+      }
     }
   });
 
   // ---- startup -------------------------------------------------------------
+
+  // The whale clock anchors immediately; the route waits for the first animated
+  // build, so static never requests it. A failed HEAD leaves the local clock.
+  anchorClock(true);
 
   // Static needs the colour map immediately; the animated build reuses this
   // decode instead of fetching the same 40 MPx WebP again.
