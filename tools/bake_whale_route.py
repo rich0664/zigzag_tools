@@ -22,28 +22,30 @@ The route is a planned corridor, not a particle simulation. Tarjan bridges on
 the 16-tile walkable graph leave a largest 2-edge core of 53,304 cells (13.65M
 tiles, 62.5 % of the deep mask). 87 blue-noise waypoints on that core; the
 duplicate-edge replans plus geometric U-turn drops remove 48 waypoints while
-staying at 40.5 % of the deep 512-tile cells (bbox 76.5 x 92.9 %). Every corner
+staying at 42.3 % of the deep 512-tile cells (bbox 76.9 x 93.0 %). Every corner
 above 20 degrees is filleted with a mask-validated quadratic Bezier (d=40;
-628 corners; 3 could not fit and are listed in the run log), then Chaikin 3.
+628 corners, none left unfilleted), then Chaikin 3. A sharp corner that lands
+on the corridor's arbitrary seam start is rolled into the interior first, so
+the d-window never wraps.
 
 The loop is resampled at an exact multiple of dt: N = round(D/dt), L = N*dt,
 alpha = D/L, records at t_i = i*dt; the last record is one dt before the start
-(seam spacing ~45 tiles, seam turn 0.0). The one-tour loop is **8.26 h**, 1,487
-records, **11,912 B (11.6 KiB)**, maxDepth 220/16. The current-modulated speed
-is the brief's formula capped at 0.03/kappa with a 0.25 floor (record mean
-1.692, median 1.715 tiles/s; with/against ratio 2.197, corr 0.900).
+(seam spacing ~45 tiles, seam turn 0.0). The one-tour loop is **8.67 h**, 1,561
+records, **12,504 B (12.2 KiB)**, maxDepth 221/16. The current-modulated speed
+is the brief's formula capped at 0.03/kappa with a 0.25 floor, where kappa is
+the local maximum over a 20-tile neighbourhood so a record cannot land beside
+a tight corner carrying its higher speed (record mean 1.639, median 1.656
+tiles/s; with/against ratio 2.148, corr 0.813).
 
 Surface windows are shaped at the 20 s record depths: one zero record with
-neighbours at 3-5 tiles gives stored linear runs of 12/14/18 s (min/median/max,
-83 windows, 0 outside 10-20 s); every window has a 20 s record-step ramp and is
-kept at least 60 s from any record above 0.03 rad/s. All 1,239 ring-visible
+neighbours at 3-5 tiles gives stored linear runs of 10/14/18 s (min/median/max,
+84 windows, 0 outside 10-20 s); every window has a 20 s record-step ramp and is
+kept at least 60 s from any record above 0.03 rad/s. All 1,302 ring-visible
 seconds are open water.
 
-Turn rule (owner ruling, documented exception): planned route <= 0.06
-(measured 0.030), seam <= 0.02 (0.000), record max <= 0.09 (0.0877), at most
-20 records over 0.06 in one span (15 in a 45 s span at record 325,
-(3671.5, 2067.9)); the alternative was dropping the three tight passages at
-D ~ 28 / seabed ~ 0.300, which the 43.2 % coverage did not justify.
+Turn rule: planned route <= 0.06 (measured 0.0300), seam <= 0.02 (0.0000),
+record max <= 0.10 with at most 2 records over 0.06 (measured max 0.0546,
+none over 0.06); mean 0.00732 rad/s.
 
 
 `--check` re-samples the *stored* route at every second (Catmull-Rom, wrapping,
@@ -90,8 +92,8 @@ D_SAFE = 45.0                 # surface windows and the steering potential
 DEPTH_MIN = 0.30              # hard seabed validity gate (owner ruling)
 SURF_DEPTH = 0.35             # surface/soft preference
 TURN_MAX = 0.060              # record soft gate; isolated samples allowed to 0.10
-TURN_REC_MAX = 0.090          # accepted isolated sampling artifact (exception)
-TURN_ALLOW = 20               # at most this many records over TURN_MAX, one span
+TURN_REC_MAX = 0.100          # accepted isolated sampling artifact
+TURN_ALLOW = 2                # at most this many records over TURN_MAX
 TURN_SEAM = 0.020             # loop seam
 TURN_SOFT = 0.015             # soft report threshold
 V0 = 1.75                     # tiles/s base speed
@@ -746,9 +748,15 @@ def route_profile(g, route):
     dh = np.diff(np.unwrap(heading))
     dh = np.concatenate([dh, [wrap_pi(heading[0] - heading[-1])]])
     curv = np.abs(dh) / ds
-    k = 5
+    k = 1
     pad = np.concatenate([curv[-k:], curv, curv[:k]])
     curv = np.convolve(pad, np.ones(2 * k + 1) / (2 * k + 1), mode="valid")
+    # cap the speed on the sharpest point of a small neighbourhood, so a
+    # record cannot land beside a tight corner and carry its higher speed in
+    w = 2
+    cp = np.concatenate([curv[-w:], curv, curv[:w]])
+    curv = np.max(np.stack([cp[j:j + len(curv)] for j in range(2 * w + 1)]),
+                  axis=0)
 
     ys = p[:, 0]
     xs = p[:, 1]
@@ -1188,8 +1196,9 @@ def check_route(g, rec, raw, raw2, path, bridge_start,
         log(f"  flagged record {k // DT} t={k}s ({x[k]:.1f},{y[k]:.1f}) "
             f"turn {turn[k]:.4f}")
     span = int(over06[-1] - over06[0]) if over06.size else 0
-    log(f"turn exception: {over06.size} over 0.06 in a {span} s span "
-        f"(allowed {TURN_ALLOW}); {over08.size} over 0.08")
+    log(f"turn over {TURN_MAX}: {over06.size} (allowed {TURN_ALLOW}), "
+        f"{over08.size} over 0.08"
+        + (f", spread {span} s" if over06.size else ""))
 
 
     # speed with vs against the current
@@ -1298,8 +1307,6 @@ def check_route(g, rec, raw, raw2, path, bridge_start,
         sys.exit(f"record turn {turn.max():.4f} exceeds {TURN_REC_MAX}")
     if over06.size > TURN_ALLOW:
         sys.exit(f"{over06.size} records over {TURN_MAX} (allowed {TURN_ALLOW})")
-    if span > 60:
-        sys.exit(f"turn artifacts span {span} s, not one span <=20 s")
     if seam_turn > TURN_SEAM + 1e-9:
         sys.exit(f"seam turn {seam_turn:.4f} exceeds {TURN_SEAM}")
     open_s = (dist_s > D_SAFE) & (dep_s > SURF_DEPTH) & ~land_s
@@ -1428,7 +1435,7 @@ def make_preview(g, x, y, events, waypoints, path=PREVIEW_PATH):
         dr.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(120, 245, 255))
     sx, sy = float(x[0]) / scale, float(y[0]) / scale
     dr.ellipse((sx - 7, sy - 7, sx + 7, sy + 7), outline=(255, 255, 255), width=2)
-    dr.text((10, 10), "whale route (one tour, 8.3 h) - yellow line, white start "
+    dr.text((10, 10), "whale route (one tour, 8.7 h) - yellow line, white start "
             "ring, cyan surface breaks, green waypoints", fill=(255, 255, 255))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     base.save(path)
@@ -1486,7 +1493,7 @@ def corridor_coverage(g, P, corridor):
     return cov, bw, bh
 
 
-def fillet_corners(g, corridor, passes=3, d0=40.0):
+def fillet_corners(g, corridor, passes=12, d0=40.0):
     """Mask-validated quadratic Bézier fillet at every corner >20 degrees,
     including the 16-tile grid's 90-degree steps. Applied before Chaikin, and
     iterated so newly exposed short-radius corners are filleted too."""
@@ -1552,6 +1559,11 @@ def fillet_corners(g, corridor, passes=3, d0=40.0):
                 break
             j = int(corners[np.argmax(turn[corners])])
             sj = cum[j]
+            # the corridor is closed: a sharp corner at the arbitrary seam
+            # start wraps the d-window, so roll it into the interior first
+            if sj < d0 or sj > L - d0:
+                p = np.roll(p, len(p) // 2 - j, axis=0)
+                continue
             chosen = None
             for d in (d0, 32.0, 24.0, 16.0):
                 P0, k0, u0 = point_at(sj - d)
@@ -1569,7 +1581,8 @@ def fillet_corners(g, corridor, passes=3, d0=40.0):
             if chosen is None:
                 failed.append((int(j), float(turn[j]),
                                float(g.d(p[j][0], p[j][1])),
-                               float(g.depth01(p[j][0], p[j][1]))))
+                               float(g.depth01(p[j][0], p[j][1])),
+                               float(p[j][0]), float(p[j][1])))
                 tried.add((round(float(p[j][0]), 2), round(float(p[j][1]), 2)))
                 continue
             d, P0, P2, k0, k2, opt = chosen
@@ -1582,6 +1595,9 @@ def fillet_corners(g, corridor, passes=3, d0=40.0):
             break
     log(f"fillet: {total} corners (>20 deg), smallest d {min_d if total else 0:.0f}, "
         f"{len(failed)} failed")
+    for (j, tn, dd, dp, fx, fy) in failed:
+        log(f"  corner not filleted at ({fx:.0f},{fy:.0f}) turn {tn:.3f} rad, "
+            f"D {dd:.1f}, seabed {dp:.3f}")
     return p, total, (min_d if total else 0.0), failed
 
 
