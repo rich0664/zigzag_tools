@@ -54,9 +54,10 @@ const float BORDER_BLACK_OUT = 1.0;
 // Only normalises the whale's surface coupling; the shader never sees maxDepth.
 const float WHALE_MAX_DEPTH = 14.0;
 
-// Whale ring shore width, in tiles. The coast's uShoreW is ~16; this short
-// band gets the same number of crests by scaling the wave frequency and the
-// wobble noise. Easy to tune.
+// Whale ring shore width, in tiles. The ring uses the coast's own wave
+// frequencies and noise (never a uShoreW / WHALE_SHORE_W ratio: 6.4x would put
+// the wavelength below one texel and alias on the 1-tile grid), so this short
+// band shows about one crest line instead of the coast's several. Easy to tune.
 const float WHALE_SHORE_W = 2.5;
 
 float hash(vec2 p) {
@@ -134,9 +135,9 @@ vec2 parPos(vec2 p, float dep) {
 }
 
 // ---- shore waves ------------------------------------------------------------
-// One model for the coast's wave/foam band. The whale ring calls the same
-// function with a short width and scaled frequencies, so it reads as a
-// miniature shoreline instead of a different effect. Distances are in tiles.
+// One model for the coast's wave/foam band and the whale ring. Both call it at
+// the coast's spatial frequencies and noise; only the shore width, shelf width,
+// distance and wet mask differ. Distances are in tiles.
 struct ShoreParams {
   vec2 p;            // noise position (map texels)
   vec2 flow;         // current direction
@@ -147,10 +148,6 @@ struct ShoreParams {
   float w;           // shore width
   float shelfW;      // shelf glow width
   float wetMul;      // 1 in water; the coast passes its wet mask
-  float freq;        // spatial frequency multiplier
-  float noiseScale;  // noise-domain multiplier
-  float wobScale;    // wobble amplitude multiplier
-  float breakupAmp;  // 1 = full coast breakup
 };
 struct ShoreWaves {
   float crest;       // inbound + outbound crest, before the shore mask
@@ -160,26 +157,23 @@ struct ShoreWaves {
   float shelf;       // shelf glow modulation (already wet-scaled)
 };
 ShoreWaves shoreWaves(ShoreParams s) {
-  vec2 n1 = s.p * s.noiseScale;
-  vec2 wet1 = (s.p - s.flow * (s.travel * 0.30 * s.ph1)) * s.noiseScale;
-  vec2 wet2 = (s.p - s.flow * (s.travel * 0.30 * s.ph2)) * s.noiseScale;
-  vec2 sh1 = (s.p - s.flow * (s.travel * 0.40 * s.ph1)) * s.noiseScale;
-  vec2 sh2 = (s.p - s.flow * (s.travel * 0.40 * s.ph2)) * s.noiseScale;
+  vec2 n1 = s.p;
+  vec2 wet1 = s.p - s.flow * (s.travel * 0.30 * s.ph1);
+  vec2 wet2 = s.p - s.flow * (s.travel * 0.30 * s.ph2);
+  vec2 sh1 = s.p - s.flow * (s.travel * 0.40 * s.ph1);
+  vec2 sh2 = s.p - s.flow * (s.travel * 0.40 * s.ph2);
   float lap2 = fbm(wet1 * 0.90 + 17.0) * s.w1
              + fbm(wet2 * 0.90 + 17.0) * s.w2;
-  // Wobble the isolines so crests wander; the amplitude shrinks with the
-  // shore width so it cannot tear a short ring.
-  float wob = (fbm(n1 * 0.14 + 31.0) - 0.5) * 2.2 * s.wobScale;
-  float breakupRaw = smoothstep(0.05, 0.60, fbm(n1 * 0.05 + 5.0));
-  float breakup = breakupRaw;
-  if (s.breakupAmp < 1.0) breakup = mix(1.0, breakupRaw, s.breakupAmp);
+  // Wobble the isolines so crests wander.
+  float wob = (fbm(n1 * 0.14 + 31.0) - 0.5) * 2.2;
+  float breakup = smoothstep(0.05, 0.60, fbm(n1 * 0.05 + 5.0));
   // Two trains: one runs in, one runs out, with separate wavelengths, speeds
   // and slow phase offsets so the cycles are not in lockstep.
   float phIn = (fbm(n1 * 0.045 + 7.0) - 0.5) * 6.2832;
   float phOut = (fbm(n1 * 0.055 + 23.0) - 0.5) * 6.2832;
-  float wIn = sin((s.d * s.freq + wob) * 1.05
+  float wIn = sin((s.d + wob) * 1.05
                   + uTime * uWaveSpeed + phIn);
-  float wOut = sin((s.d * s.freq + wob * 1.3) * 0.74
+  float wOut = sin((s.d + wob * 1.3) * 0.74
                    - uTime * uWaveSpeed * 0.63 + phOut);
   float cIn = pow(max(wIn, 0.0), 3.0);
   float cOut = smoothstep(0.10, 0.90, wOut) * 0.55;
@@ -344,8 +338,7 @@ void main() {
   // model is used by the whale ring below.
   ShoreWaves coast = shoreWaves(ShoreParams(
     p, flow, cycleTravel, ph1, ph2, w1, w2,
-    d, uShoreW, uShelf, wet,
-    1.0, 1.0, 1.0, 1.0));
+    d, uShoreW, uShelf, wet));
   float shore = coast.shore * wet;
   col += vec3(0.58, 0.80, 0.94) * coast.crest * shore * uFoam;
 
@@ -442,17 +435,15 @@ void main() {
     col = mix(col, bodyCol, bodyMask);
 
     // ---- surface ring -------------------------------------------------------
-    // Same map texel grid and the same shore-wave model as the coast, with a
-    // 2.5-tile band. Frequencies and noise are scaled by the width ratio so the
-    // short ring shows the coast's crest count and relative wobble/breakup.
+    // The coast model with the same spatial frequencies and noise, only a
+    // shorter 2.5-tile shore width and its own shelf width, so about one crest
+    // line shows across the band. Scaling by uShoreW / WHALE_SHORE_W (6.4x)
+    // would alias above Nyquist on the 1-tile texel grid.
     float ringR = max(dWhale, 0.0);
-    float whaleScale = WHALE_SHORE_W / uShoreW;
-    float whaleFreq = 1.0 / max(whaleScale, 1e-4);
     float whaleShelfW = WHALE_SHORE_W * (uShelf / uShoreW);
     ShoreWaves ringWaves = shoreWaves(ShoreParams(
       p, flow, cycleTravel, ph1, ph2, w1, w2,
-      ringR, WHALE_SHORE_W, whaleShelfW, 1.0,
-      whaleFreq, whaleFreq, whaleScale, whaleScale));
+      ringR, WHALE_SHORE_W, whaleShelfW, 1.0));
     float ringOn = 1.0 - bodyMask;
     col += vec3(0.58, 0.80, 0.94) * ringWaves.crest * ringWaves.shore
          * ringOn * uWhaleShape.z * uFoam;
