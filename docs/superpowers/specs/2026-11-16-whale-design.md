@@ -29,11 +29,13 @@ ellipsoid beyond the first pass.
   texture row. A vertical-flip mistake is silent and self-consistent; the tests
   in this design exist to make it impossible.
 - The sea's world is texture-row tiles; `p` is the snapped texel-centre sample,
-  `world` the continuous position. The whale **moves on `world`** (continuous,
-  smooth) and is **rendered on a texel grid anchored to itself**: its local body
-  coordinates are quantised to ~1-tile cells, so it is a 5-6 × 2-3 block 3D
-  creature whose blocks travel with it. It is **not** snapped to the map grid —
-  that would step one tile at a time. The ring uses the same local cell grid.
+  `world` the continuous position. The whale **moves on `world`** (continuous
+  pose) but is **rendered on the sea's own texel grid** (`p`): each sea texel is
+  fully whale or not, so its pixels line up with the seabed and the trim. The
+  silhouette advances one texel at a time; boundary texels are **dithered** with
+  the sea's existing dither pattern and the sub-texel edge distance so the motion
+  reads as a gradual pixel change, not a whole-body jump. No whale-anchored or
+  rotating grid.
 
 ## Goals
 
@@ -201,15 +203,15 @@ trim all apply consistently and tiles occlude it on land.
   for the continuous seabed that shifts an off-centre object by tens of tiles,
   clips it against the 12-tile bounding-box gate, and distorts its size with
   zoom.
-- **Whale-anchored cell grid (smooth motion, blocky 3D shading):** the body's
-  local coordinates are quantised to a cell grid anchored to the whale
-  (`lq = (floor(local / cell) + 0.5) * cell`, cell ≈ 1 tile); the ellipse,
-  `zTop`, a per-cell 3D normal and the hard mask are evaluated from `lq`. The
-  pose itself stays continuous, so the whole block pattern translates smoothly
-  instead of stepping with the map grid. Each ~1-tile cell has its own normal
-  and Lambert + small-specular shading, so the body reads as a chunky but shaded
-  3D creature, not two flat colours per cell; the waterline and fog weights are
-  per cell. The ring uses `lq` too.
+- **Map-grid texel rendering (continuous pose, pixel-aligned 3D body):** the
+  analytic body is sampled at `p` (the sea's texel centres); the ellipse,
+  `zTop`, a per-texel 3D normal and the hard mask use that texel position, so the
+  whale's pixels are the same grid as the seabed and the trim. The pose stays
+  continuous and the silhouette changes one texel at a time; boundary texels are
+  dithered with the sea's dither term and the sub-texel edge distance so the
+  motion is a gradual pixel change rather than a whole-body jump. Each texel is
+  shaded from its own normal (Lambert + small specular), so the body reads as a
+  chunky, shaded 3D creature. The ring uses `p` too.
 
 ### Fog and the ring
 
