@@ -18,21 +18,27 @@ seabed gate from 0.35 to 0.30: at 0.30 the deep mask is one component with
 soft preference: the potential and the surface windows prefer it, but it never
 walls off a reachable basin.
 
-The route is a planned corridor, not a particle simulation. 80-120 blue-noise
-waypoints on the 16-tile walkable grid are ordered by nearest-neighbour + 2-opt;
-A* joins consecutive waypoints with the ruled cost (depth preference 3x over
-0.30-0.45 plus a 0.25 with-current bonus). The corridor is turned into control
-points (Douglas-Peucker at 4 tiles), fitted with a periodic Catmull-Rom, and
-validated at 0.25 tiles against the 1-tile mask; any shortcut outside the mask
-re-inserts corridor points. The shipped corridor visits 78/89 waypoints,
-82/111 deep 512-tile cells (73.9 %), bbox 97.8 % x 96.9 % of the map, and takes
-31.79 h for one tour (1.32 days), 5,722 records.
+The route is a planned corridor, not a particle simulation. Tarjan bridges are
+computed on the 16-tile walkable graph (330 bridges); the largest 2-edge
+component is 53,304 cells = 13.65M tiles (33.5 % of the map, 62.5 % of the deep
+mask, bbox 0.904 x 0.975). 87 blue-noise waypoints on that core are ordered by
+nearest-neighbour + 2-opt; sequential A* joins them with an x8 used-edge
+penalty, immediate-reverse hard bans and six duplicate-edge replan passes
+(7 replanned, 0 dropped, 3 duplicate edges). Chaikin 0.25 corner cutting on
+the closed corridor (3/3 iterations validated), then uniform 10-tile control
+points.
 
-The body moves at 1 s along the corridor at the committed current-speed formula
-(V0 = 1.75 tiles/s, current alignment) and the loop duration is the traversal
-time. The turn cap is a diagnostic for the planned line (the mean is
-0.0055 rad/s; a few record-scale U-turns read 3.14). A 120 s quintic Hermite
-bridge (C2 at both ends) closes the seam.
+The 1 s walk uses the current-modulated speed after the geometric cap
+(v = v_cap * clamp(0.75 + 0.5*spd*cos, 0.6, 1.3), floor 0.25 tiles/s). The loop
+is one tour: 50.12 h (2.09 days), 9,022 records, 72,192 B, maxDepth 223/16;
+bbox 88.8 % x 97.4 %, 63/111 deep 512-tile cells (56.8 %), 85/87 waypoints
+within 250 tiles. A 120 s quintic Hermite bridge closes the seam.
+
+The surface depth is shaped at the 20 s record times, not on a 1 s design
+array: one zero record with neighbours at 3-5 tiles gives a stored linear
+visible run of 10/14/18 s (min/median/max), 0 outside 10-20 s. `--check`
+builds to a temporary file, validates the stored/interpolated route, and only
+then atomically replaces dist/zigzag-whale.bin.
 
 `--check` re-samples the *stored* route at every second (Catmull-Rom, wrapping,
 exactly like whale-core.js), so the deep-water, turn-rate and current gates see
@@ -67,37 +73,21 @@ import bake_shader_assets as bsa                               # noqa: E402
 
 # ---- committed route constants -------------------------------------------
 DT = 20                       # seconds per record
-DAYS = 7
-LOOP_SEC = DAYS * 24 * 3600
-COUNT = LOOP_SEC // DT        # 30240 records
+LOOP_SEC = 0                  # set by walk_route from the one-tour time
+COUNT = 0                     # set by walk_route
 SEED = 2026                   # committed; fits the uint16 header field
 MAGIC = 0x5748414C
 VERSION = 1
 
 MARGIN = 60.0                 # tiles kept clear of the map border
-NAV_MARGIN = 120.0            # guide stays further inside than the hard gate
 D_MIN = 28.0                  # hard deep-water gate (outside the 26-tile shelf)
 D_SAFE = 45.0                 # surface windows and the steering potential
 DEPTH_MIN = 0.30              # hard seabed validity gate (owner ruling)
 SURF_DEPTH = 0.35             # surface/soft preference
-SAFE_D = 40.0                 # integration envelope, above the 28-tile gate
-SAFE_DEP = 0.38               # integration envelope, above the 0.30 gate
-HARD_D = 29.5                 # never step below this (gate 28 + Catmull margin)
-HARD_DEP = 0.352              # never step below this (gate 0.35 + margin)
 TURN_MAX = 0.060              # sampled hard gate (180 deg in >=52 s)
 TURN_SOFT = 0.015             # soft report threshold
-TURN_STEER = 0.010            # steering cap; leaves Catmull overshoot headroom
 V0 = 1.75                     # tiles/s base speed
 WP_MIN, WP_MAX = 80, 120      # deep-water waypoints
-NAV_CELL = 24                 # tiles per navigation cell
-NAV_DMIN = 36.0               # open-water grid clearance
-NAV_DEPTH = 0.42              # open-water grid seabed depth
-WP_DMIN = 80.0                # waypoint mask
-WP_DEPTH = 0.50
-LINE_CLEAR = 70.0             # straight-leg clearance
-LINE_DEPTH = 0.48
-LOOKAHEAD = 200.0             # pure-pursuit distance, tiles
-HOME_SEC = 9000               # final BFS homing leg, seconds before the end
 BRIDGE_SEC = 120              # Hermite loop closure
 SURF_MIN, SURF_MAX = 10, 20   # seconds at the surface
 SURF_RAMP = 15.0              # seconds of cosine descent/ascent
@@ -106,12 +96,6 @@ CURRENT_DEFLECT = 1.0
 CURRENT_REACH = 50.0
 MAX_DEPTH_TILES = 14.0
 TRACE = False                 # diagnostics: per-10-minute integration dump
-
-# obstacle whiskers: 13 headings (+-90 deg) and 8 ranges out to 520 tiles
-WHISK_ANG = np.deg2rad(np.arange(-180, 181, 15, dtype=np.float64))
-WHISK_DIST = np.array([30.0, 60.0, 90.0, 130.0, 180.0, 240.0, 320.0, 420.0,
-                       540.0])
-WHISK_NEAR = WHISK_DIST <= 240.0
 
 # ---- row-order landmarks --------------------------------------------------
 # Each is deep water on the true rows and not deep water at (x, H-1-y). They
@@ -523,89 +507,6 @@ def order_tour(g, pts):
     return tour
 
 
-def astar(P, a, b):
-    """A* on the 16-tile grid with the ruled cost."""
-    ok = P['ok']
-    ny, nx = ok.shape
-    cell = P['cell']
-    cdx, cdy = P['cdirx'], P['cdiry']
-    dep = P['dep']
-    ncell = ny * nx
-    flat_a = a[0] * nx + a[1]
-    flat_b = b[0] * nx + b[1]
-    gs = np.full(ncell, np.inf)
-    par = np.full(ncell, -1, dtype=np.int64)
-    gs[flat_a] = 0.0
-    par[flat_a] = flat_a
-    heap = [(cell * math.hypot(a[0] - b[0], a[1] - b[1]), 0.0, a)]
-    dirs = ((-1, 0), (1, 0), (0, -1), (0, 1),
-            (-1, -1), (-1, 1), (1, -1), (1, 1))
-    while heap:
-        f, cost, (y, x) = heapq.heappop(heap)
-        if (y, x) == b:
-            break
-        k = y * nx + x
-        if cost > gs[k] + 1e-9:
-            continue
-        for dy, dx in dirs:
-            yy, xx = y + dy, x + dx
-            if not (0 <= yy < ny and 0 <= xx < nx and ok[yy, xx]):
-                continue
-            if dy and dx and not (ok[y + dy, x] and ok[y, x + dx]):
-                continue
-            length = cell * (1.41421356237 if (dy and dx) else 1.0)
-            dd = dep[yy, xx]
-            fac = 1.0 + 3.0 * max(0.0, 0.45 - float(dd)) / 0.15
-            nrm = 1.41421356237 if (dy and dx) else 1.0
-            cosd = (dx * cdx[y, x] + dy * cdy[y, x]) / nrm
-            fac += 0.25 * max(0.0, -cosd)
-            ng = cost + length * fac
-            kk = yy * nx + xx
-            if ng < gs[kk] - 1e-9:
-                gs[kk] = ng
-                par[kk] = k
-                hh = cell * math.hypot(yy - b[0], xx - b[1])
-                heapq.heappush(heap, (ng + hh, ng, (yy, xx)))
-    if par[flat_b] < 0:
-        return None
-    out = [b]
-    cur = flat_b
-    while cur != flat_a:
-        cur = int(par[cur])
-        out.append((cur // nx, cur % nx))
-    out.reverse()
-    return out
-
-
-def corridor_leg(P, p, q, start=None):
-    a = start if start is not None else nearest_walk(P, p[0], p[1])
-    b = nearest_walk(P, q[0], q[1])
-    if a is None or b is None:
-        return None
-    path = astar(P, a, b)
-    if path is None:
-        return None
-    cell = P['cell']
-    # cell centres only: a waypoint can sit outside the walkable block, and
-    # the short segment from it to the nearest centre may cross a shelf
-    return [((cy + 0.5) * cell, (cx + 0.5) * cell) for cy, cx in path]
-
-
-def cell_degree(P, c):
-    y, x = c
-    ok = P['ok']
-    ny, nx = ok.shape
-    n = 0
-    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1),
-                   (-1, -1), (-1, 1), (1, -1), (1, 1)):
-        yy, xx = y + dy, x + dx
-        if 0 <= yy < ny and 0 <= xx < nx and ok[yy, xx]:
-            if dy and dx and not (ok[y + dy, x] and ok[y, x + dx]):
-                continue
-            n += 1
-    return n
-
-
 def astar_pen(P, a, b, hard=None, soft=None, near=None):
     """A* with an ×8 penalty on already-used edges and optional hard bans."""
     ok = P['ok']
@@ -712,7 +613,11 @@ def plan_corridor_disjoint(g, P, pts, tour):
             log(f"  drop waypoint {tour[(k + 1) % n]} ({q[1]:.0f},{q[0]:.0f}): "
                 f"no disjoint corridor")
             continue
-        legs.append((k, math.hypot(p[0] - q[0], p[1] - q[1]), 0.0, path))
+        ca = ((a[0] + 0.5) * cell, (a[1] + 0.5) * cell)
+        cb = ((b[0] + 0.5) * cell, (b[1] + 0.5) * cell)
+        dstart = math.hypot(ca[0] - q[0], ca[1] - q[1])
+        dend = math.hypot(cb[0] - q[0], cb[1] - q[1])
+        legs.append((k, dstart, dend, path))
         prev = path[-1]
         prev_path = path
 
@@ -779,109 +684,6 @@ def plan_corridor_disjoint(g, P, pts, tour):
         [(k, d0, d1) for (k, d0, d1, _p) in legs], dropped, replanned, dups
 
 
-def plan_corridor(g, P, pts, tour):
-    n = len(tour)
-    corridor = []
-    legs = []
-    dropped = []
-    prev = None
-    for k in range(n):
-        p = pts[tour[k]]
-        q = pts[tour[(k + 1) % n]]
-        bq = nearest_walk(P, q[0], q[1])
-        if bq is not None and cell_degree(P, bq) <= 1 and prev is not None:
-            dropped.append(int(tour[(k + 1) % n]))
-            log(f"  drop dead-end waypoint {tour[(k + 1) % n]} "
-                f"({q[1]:.0f},{q[0]:.0f})")
-            continue
-        leg = corridor_leg(P, p, q, prev)
-        if leg is None:
-            m = ((p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5)
-            leg1 = corridor_leg(P, p, m, prev)
-            end1 = (int(leg1[-1][0] // P['cell']), int(leg1[-1][1] // P['cell'])) \
-                if leg1 else prev
-            leg2 = corridor_leg(P, m, q, end1)
-            if leg1 is not None and leg2 is not None:
-                leg = leg1 + leg2[1:]
-            else:
-                dropped.append(int(tour[(k + 1) % n]))
-                log(f"  drop waypoint {tour[(k + 1) % n]} "
-                    f"({q[1]:.0f},{q[0]:.0f}): no corridor")
-                continue
-        if corridor and leg and math.hypot(*(np.array(leg[0]) - np.array(corridor[-1]))) < 1e-6:
-            leg = leg[1:]
-        corridor.extend(leg)
-        prev = (int(leg[-1][0] // P['cell']), int(leg[-1][1] // P['cell']))
-        dstart = math.hypot(p[0] - q[0], p[1] - q[1])
-        dend = math.hypot(leg[-1][0] - q[0], leg[-1][1] - q[1])
-        legs.append((k, dstart, dend))
-    # close back to the first waypoint if the last leg was dropped
-    if not corridor:
-        sys.exit("no corridor")
-    if math.hypot(corridor[0][0] - corridor[-1][0],
-                  corridor[0][1] - corridor[-1][1]) > 1e-6:
-        corridor.append(corridor[0])
-    corridor = np.asarray(corridor, dtype=np.float64)
-    # loop erasure on the cell graph: a repeated cell means the corridor went
-    # out and came back (a dead-end excursion) and it must not stay in the
-    # route, because it is a 180-degree reversal for the whale. Only exact
-    # cell revisits are removed, so near passes are untouched.
-    cell = P['cell']
-    erased = 0
-    log(f"corridor: {len(corridor)} points, {len(legs)} legs, "
-        f"{len(dropped)} dropped waypoints, {erased} loop-erased points")
-    return corridor, legs, dropped
-
-
-def dp_keep(points, tol):
-    """Douglas-Peucker indices on an open polyline."""
-    n = len(points)
-    keep = {0, n - 1}
-    stack = [(0, n - 1)]
-    p = np.asarray(points)
-    while stack:
-        i, j = stack.pop()
-        if j <= i + 1:
-            continue
-        a = p[i]
-        b = p[j]
-        ab = b - a
-        l2 = float(ab @ ab)
-        seg = p[i + 1:j]
-        if l2 < 1e-9:
-            d = np.hypot(seg[:, 0] - a[0], seg[:, 1] - a[1])
-        else:
-            u = np.clip(((seg - a) @ ab) / l2, 0.0, 1.0)
-            d = np.hypot(seg[:, 0] - (a[0] + u * ab[0]),
-                         seg[:, 1] - (a[1] + u * ab[1]))
-        k = int(np.argmax(d))
-        if float(d[k]) > tol:
-            m = i + 1 + k
-            keep.add(m)
-            stack.append((i, m))
-            stack.append((m, j))
-    return sorted(keep)
-
-
-def catmull_closed(ctrl, step=0.25):
-    p = np.asarray(ctrl, dtype=np.float64)
-    if np.hypot(*(p[0] - p[-1])) < 1e-6:
-        p = p[:-1]
-    n = len(p)
-    out = []
-    for i in range(n):
-        p0 = p[(i - 1) % n]
-        p1 = p[i]
-        p2 = p[(i + 1) % n]
-        p3 = p[(i + 2) % n]
-        seg = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
-        m = max(2, int(math.ceil(seg / step)))
-        for k in range(m):
-            u = k / m
-            out.append(catmull(p0, p1, p2, p3, u))
-    return np.asarray(out, dtype=np.float64)
-
-
 def route_bad(g, route):
     yi = np.clip(np.round(route[:, 0]).astype(np.int64), 0, g.H - 1)
     xi = np.clip(np.round(route[:, 1]).astype(np.int64), 0, g.W - 1)
@@ -906,124 +708,6 @@ def resample_poly(poly, step):
         u = (s0 - cum[k]) / max(sl[k], 1e-9)
         out[i] = p[k] + u * (p[(k + 1) % len(p)] - p[k])
     return out
-
-
-def smooth_corridor(g, corridor):
-    """Constrained corner rounding that never leaves the mask.
-
-    The corridor is a chain of 16-tile cell centres with 90-degree turns. A
-    Catmull-Rom through those controls cuts the inside of every corner, which
-    is exactly where the shelf is, so instead the polyline is resampled at 4
-    tiles and repeatedly averaged only where the new point is still in the
-    hard mask. The 0.25-tile validation then guards the final line.
-    """
-    c = np.asarray(corridor, dtype=np.float64)
-    # drop duplicated points and exact out-and-back reversals
-    out = [c[0]]
-    for p in c[1:]:
-        if math.hypot(*(p - out[-1])) > 1e-6:
-            out.append(p)
-    changed = True
-    while changed and len(out) > 4:
-        changed = False
-        for i in range(1, len(out) - 1):
-            if math.hypot(*(out[i - 1] - out[i + 1])) < 1e-6:
-                del out[i]
-                changed = True
-                break
-    c = np.asarray(out)
-    if np.hypot(*(c[0] - c[-1])) > 1e-6:
-        c = np.vstack([c, c[0]])
-
-    dense = resample_poly(c, 4.0)
-    n = len(dense)
-    for _ in range(300):
-        lap = 0.25 * np.roll(dense, 1, axis=0) + 0.5 * dense \
-            + 0.25 * np.roll(dense, -1, axis=0)
-        yi = np.clip(np.round(lap[:, 0]).astype(np.int64), 0, g.H - 1)
-        xi = np.clip(np.round(lap[:, 1]).astype(np.int64), 0, g.W - 1)
-        good = (g.dist[yi, xi] >= 28.2) & (g.dep[yi, xi] >= 0.3005) \
-            & (lap[:, 0] >= MARGIN) & (lap[:, 0] <= g.H - 1 - MARGIN) \
-            & (lap[:, 1] >= MARGIN) & (lap[:, 1] <= g.W - 1 - MARGIN)
-        if not good.any():
-            break
-        dense[good] = lap[good]
-    route = resample_poly(dense, 0.25)
-    bad = route_bad(g, route)
-    if bad.size:
-        log(f"  constrained smoothing left {bad.size} bad 0.25-tile samples; "
-            f"falling back to the safe corridor line")
-        route = resample_poly(c, 4.0)
-    log(f"smooth: {len(dense)} points at 4 tiles, {len(route)} samples, "
-        f"{bad.size} bad")
-    return route
-
-
-def remove_excursions(g, route, turn_limit=0.03, rounds=40):
-    """Cut dead-end out-and-back excursions until no 0.25-tile sample exceeds
-    `turn_limit`. The excursion is the loop between the two closest points of
-    the route around the cusp; removing it is the fallback when a 30-tile
-    U-turn cannot be fitted inside the mask (owner ruling 2026-11-16)."""
-    p = np.asarray(route, dtype=np.float64)
-    for r in range(rounds):
-        seg = np.roll(p, -1, axis=0) - p
-        ds = np.hypot(seg[:, 0], seg[:, 1])
-        ds[ds < 1e-6] = 1e-6
-        h = np.arctan2(seg[:, 0], seg[:, 1])
-        dh = np.abs(np.diff(np.unwrap(h)))
-        dh = np.concatenate([dh, [abs(wrap_pi(h[0] - h[-1]))]])
-        turn = dh / ds * 0.25
-        bad = np.nonzero(turn > turn_limit)[0]
-        if bad.size == 0:
-            break
-        t = int(bad[np.argmax(turn[bad])])
-        n = len(p)
-        lo = max(0, t - 4000)
-        hi = min(n, t + 4000)
-        best = None
-        for i in range(lo, hi, 4):
-            for j in range(i + 200, hi, 4):
-                d = (p[i, 0] - p[j, 0]) ** 2 + (p[i, 1] - p[j, 1]) ** 2
-                if best is None or d < best[0]:
-                    best = (d, i, j)
-        if best is None or best[0] > 400.0:
-            log(f"  excursion at {t}: no self-approach under 8 tiles; stop")
-            break
-        _d2, i, j = best
-        p = np.vstack([p[:i + 1], p[j:]])
-        log(f"  cut excursion {i}..{j} ({j - i} samples) at "
-            f"({p[i, 1]:.0f},{p[i, 0]:.0f})")
-    return p
-
-
-def smooth_route_25(g, route, radius=30.0, passes=2):
-    """Round every corner of the 0.25-tile route with a box blur of `radius`
-    tiles, accepting a point only if it stays in the hard mask. The excursion
-    cuts leave fresh joins at the cut ends; this rounds them without the
-    point-removal that would create gaps."""
-    p = np.asarray(route, dtype=np.float64)
-    keep = [0]
-    for i in range(1, len(p)):
-        if math.hypot(p[i, 0] - p[keep[-1], 0],
-                      p[i, 1] - p[keep[-1], 1]) >= 0.05:
-            keep.append(i)
-    p = p[keep]
-    k = max(3, int(round(radius / 0.25)))
-    ker = np.ones(k) / k
-    for _ in range(passes):
-        for axis in (0, 1):
-            c = np.convolve(np.r_[p[-k:, axis], p[:, axis], p[:k, axis]],
-                            ker, mode="same")[k:-k]
-            # only accept the smoothed coordinate where the whole moved point
-            # is still safe
-            cand = p.copy()
-            cand[:, axis] = c
-            yi = np.clip(np.round(cand[:, 0]).astype(np.int64), 0, g.H - 1)
-            xi = np.clip(np.round(cand[:, 1]).astype(np.int64), 0, g.W - 1)
-            good = (g.dist[yi, xi] >= 28.2) & (g.dep[yi, xi] >= 0.3005)
-            p[good] = cand[good]
-    log(f"route smooth: {len(p)} points, box radius {radius} tiles x {passes}")
-    return p
 
 
 def route_profile(g, route):
@@ -1060,9 +744,9 @@ def route_profile(g, route):
     v_form = V0 * np.clip(1.0 + 0.55 * spd * cosd - 0.20 * (1.0 - spd),
                           0.5, 1.7)
     v_cap = np.clip(0.0065 / np.maximum(curv, 1e-5), 0.05, 3.0)
-    v = np.minimum(v_form, v_cap)
-    # minimum record spacing: at dt=20 s, 0.25 tiles/s is 5 tiles; this keeps
-    # consecutive records from collapsing onto each other at tight corners
+    # current modulation survives the geometric cap: the cap sets the arc
+    # speed, the multiplier scales it by alignment with the current
+    v = v_cap * np.clip(0.75 + 0.5 * spd * cosd, 0.6, 1.3)
     v = np.maximum(v, 0.25)
     L = float(np.sum(ds))
     spacing = float(L / len(p))
@@ -1172,9 +856,17 @@ def periodic_noise(t, harmonics):
     return out
 
 
-def depth_design(n, open_pos, rng):
-    """Periodic deep/medium depth plus raised-cosine surface windows. Windows
-    and their 15 s ramps are only accepted where every second is open water."""
+def record_depth_design(g, sx, sy, rng):
+    """Depth at the record times (dt=10 s), with surface windows shaped so the
+    *stored* linear interpolation has a visible run (depth < 1.5) of 10-20 s.
+
+    A window is m+1 zero records (m in {0,1}); the records either side are set
+    to 3 tiles, so the 1.5-tile crossing is 5 s into the 10 s interval on each
+    side. The visible run is therefore m*10+10 s = 10 or 20 s exactly. Records
+    two steps out are kept above the base (>=4 tiles) so the crossing cannot
+    extend.
+    """
+    n = LOOP_SEC // DT
     h1 = [(67, 0.50, rng.uniform(0, 2 * math.pi)),
           (113, 0.30, rng.uniform(0, 2 * math.pi)),
           (191, 0.15, rng.uniform(0, 2 * math.pi)),
@@ -1185,38 +877,41 @@ def depth_design(n, open_pos, rng):
     h3 = [(37, 0.55, rng.uniform(0, 2 * math.pi)),
           (61, 0.30, rng.uniform(0, 2 * math.pi)),
           (97, 0.15, rng.uniform(0, 2 * math.pi))]
-
-    base = np.empty(n, dtype=np.float64)
-    for t in range(n):
-        n1 = 0.5 + 0.5 * periodic_noise(t, h1)
-        n2 = 0.5 + 0.5 * periodic_noise(t, h2)
-        n3 = 0.5 + 0.5 * periodic_noise(t, h3)
-        deep = 6.0 + 8.0 * n1
-        mid = 2.0 + 3.0 * n2
-        mix = smoothstep((n3 - 0.30) / 0.40)
-        base[t] = mid + (deep - mid) * mix
-
-    env = np.ones(n, dtype=np.float64)
+    t = np.arange(n) * DT
+    n1 = np.array([0.5 + 0.5 * periodic_noise(float(tt), h1) for tt in t])
+    n2 = np.array([0.5 + 0.5 * periodic_noise(float(tt), h2) for tt in t])
+    n3 = np.array([0.5 + 0.5 * periodic_noise(float(tt), h3) for tt in t])
+    deep = 6.0 + 8.0 * n1
+    mid = 2.0 + 3.0 * n2
+    mix = np.array([smoothstep((v - 0.30) / 0.40) for v in n3])
+    depth = mid + (deep - mid) * mix
     events = []
-    t = int(rng.uniform(*SURF_GAP))
-    while t < n - 60:
-        w = int(round(rng.uniform(SURF_MIN, SURF_MAX - 1)))
-        span = int(SURF_RAMP) + w + int(SURF_RAMP)
-        if t + span >= n - 20:
-            break
-        if open_pos[t:t + span + 1].all():
-            for k in range(int(SURF_RAMP)):
-                env[t + k] = 0.5 * (1.0 + math.cos(math.pi * k / SURF_RAMP))
-            env[t + int(SURF_RAMP):t + int(SURF_RAMP) + w + 1] = 0.0
-            for k in range(1, int(SURF_RAMP) + 1):
-                env[t + int(SURF_RAMP) + w + k] = \
-                    0.5 * (1.0 - math.cos(math.pi * k / SURF_RAMP))
-            events.append((t, w))
-            t += span + int(rng.uniform(*SURF_GAP))
+    k = int(rng.uniform(*SURF_GAP) / DT) + 2
+    while k < n - 3:
+        # one zero record; the neighbours at depth d give a visible span of
+        # 60/d seconds at dt=20 (d=6 -> 10 s, d=3 -> 20 s). Use 3..5 so the
+        # 1 s-sampled run stays inside 10-20 s.
+        dside = float(rng.uniform(3.0, 5.0))
+        j0 = max(0, (k - 1) * DT)
+        j1 = min(len(sx) - 1, (k + 1) * DT)
+        open_ok = True
+        for j in range(j0, j1 + 1, 2):
+            yy = float(np.clip(sy[j], 0, g.H - 1))
+            xx = float(np.clip(sx[j], 0, g.W - 1))
+            if g.d(yy, xx) <= D_SAFE or g.depth01(yy, xx) <= SURF_DEPTH:
+                open_ok = False
+                break
+        if open_ok:
+            depth[k] = 0.0
+            depth[k - 1] = dside
+            depth[k + 1] = dside
+            depth[k - 2] = max(depth[k - 2], 1.7)
+            depth[k + 2] = max(depth[k + 2], 1.7)
+            events.append((int(k * DT), int(60.0 / dside)))
+            k += 1 + int(rng.uniform(*SURF_GAP) / DT)
         else:
-            t += 15
-    depth = np.clip(base * env, 0.0, MAX_DEPTH_TILES)
-    return depth, events
+            k += 1
+    return np.clip(depth, 0.0, MAX_DEPTH_TILES), events
 
 
 # ---------------------------------------------------------------------------
@@ -1229,8 +924,6 @@ def to_records(xs, ys, depth):
     rd = np.clip(np.rint(depth[idx] * 16.0), 0, 255).astype("u1")
     # <HHBB + two reserved bytes: 8-byte stride, the exact WHALE_RECORD the
     # JS parser validates (`16 + 8 * count`).
-    moved = 0
-    turn_max = 0.0
     rec = np.zeros(COUNT, dtype=[("x", "<u2"), ("y", "<u2"),
                                  ("d", "u1"), ("p", "u1"), ("r", "<u2")])
     rec["x"] = rx
@@ -1354,8 +1047,8 @@ def decode_tex(rgb):
     return np.asarray(rgb, dtype=np.float32) / 255.0
 
 
-def check_route(g, rec, design_depth, raw, raw2, path, bridge_start,
-                waypoints=None, legs=None, planned_route=None, P=None, moved=0,
+def check_route(g, rec, raw, raw2, path, bridge_start,
+                waypoints=None, legs=None, moved=0,
                 replanned=0, dup_edges=0, dropped=None):
     n = LOOP_SEC
     x, y, depth, heading = sample_records(rec, n)
@@ -1368,6 +1061,12 @@ def check_route(g, rec, design_depth, raw, raw2, path, bridge_start,
     bad = np.nonzero(~ok)[0]
     log(f"deep water: {n - bad.size}/{n} 1 s samples pass "
         f"(min D {dist_s.min():.2f}, min seabed depth {dep_s.min():.3f})")
+    inside = ((x >= MARGIN) & (x <= g.W - 1 - MARGIN)
+              & (y >= MARGIN) & (y <= g.H - 1 - MARGIN))
+    if not inside.all():
+        k = np.nonzero(~inside)[0][0]
+        sys.exit(f"route margin: t={k}s at ({x[k]:.1f},{y[k]:.1f}) is inside "
+                 f"the {MARGIN:.0f}-tile border band")
     if bad.size:
         for k in bad[:8]:
             print(f"  FAIL t={k}s ({x[k]:.2f},{y[k]:.2f}) "
@@ -1440,55 +1139,70 @@ def check_route(g, rec, design_depth, raw, raw2, path, bridge_start,
     log(f"current: mean speed with {sw:.3f} tiles/s "
         f"({int(with_mask.sum())} s), against {sa:.3f} tiles/s "
         f"({int(against.sum())} s), ratio {ratio:.3f}")
+    # record-level speed vs alignment: the current multiplier must survive
+    xr = rec["x"].astype(np.float64) / 8.0
+    yr = rec["y"].astype(np.float64) / 8.0
+    nr = len(xr)
+    drx = np.roll(xr, -1) - xr
+    dry = np.roll(yr, -1) - yr
+    rstep = np.hypot(drx, dry)
+    rhead = np.arctan2(dry, drx)
+    rspd = np.empty(nr)
+    rcos = np.empty(nr)
+    for k in range(nr):
+        a, b, s, _ = g.current(float(xr[k]), float(yr[k]))
+        rspd[k] = rstep[k] / DT
+        rcos[k] = math.cos(rhead[k]) * a + math.sin(rhead[k]) * b
+    corr = float(np.corrcoef(rcos, rspd)[0, 1])
+    rw = rspd[rcos > 0.25].mean() if (rcos > 0.25).any() else 0.0
+    ra = rspd[rcos < -0.25].mean() if (rcos < -0.25).any() else 0.0
+    rratio = rw / ra if ra > 1e-9 else float("inf")
+    log(f"speed/current: corr(cos, record speed) {corr:.3f}, "
+        f"record ratio {rratio:.3f} ({rw:.3f}/{ra:.3f} tiles/s)")
+    if corr < 0.30 and rratio < 1.15:
+        sys.exit(f"current modulation is nominal: corr {corr:.3f}, "
+                 f"ratio {rratio:.3f}")
+
     if not (sw > sa):
         sys.exit(f"mean speed with the current ({sw:.3f}) is not above against "
                  f"it ({sa:.3f})")
 
-    # surface windows: the designed 1 s profile carries the structure; the
-    # stored asset is its 20 s decimation
-    surface = design_depth <= 0.0
+    # surface windows: measured on the *stored* record depths with the
+    # runtime's linear interpolation, not on the 1 s design profile
+    visible = depth < 1.5
     runs = []
     k = 0
     while k < n:
-        if surface[k]:
+        if visible[k]:
             j = k
-            while j + 1 < n and surface[j + 1]:
+            while j + 1 < n and visible[j + 1]:
                 j += 1
             runs.append((k, j))
             k = j + 1
         else:
             k += 1
-    lens = [j - k for k, j in runs]
-    log(f"surface: {len(runs)} windows, lengths "
-        f"{min(lens) if lens else 'none'}..{max(lens) if lens else 'none'} s "
-        f"(design), {int(surface.sum())} s total")
+    lens = [j - k for (k, j) in runs]
+    mn = min(lens) if lens else 0
+    md = float(np.median(lens)) if lens else 0.0
+    mx = max(lens) if lens else 0
+    outside = int(sum(1 for L in lens if not (SURF_MIN <= L <= SURF_MAX)))
+    log(f"surface (stored/interpolated): {len(runs)} windows, "
+        f"min/median/max {mn}/{md:.1f}/{mx} s, outside {SURF_MIN}-{SURF_MAX}: "
+        f"{outside}")
     if not runs:
         sys.exit("surface: no windows")
-    for (a, b) in runs:
-        if not (SURF_MIN <= b - a <= SURF_MAX):
-            sys.exit(f"surface window at {a}s is {b - a}s, outside "
-                     f"{SURF_MIN}-{SURF_MAX}")
-        pre = design_depth[max(0, a - 1)]
-        post = design_depth[min(n - 1, b + 1)]
-        pre15 = design_depth[max(0, a - int(SURF_RAMP))]
-        post15 = design_depth[min(n - 1, b + int(SURF_RAMP))]
-        # the immediate neighbours are on the cosine ramp near zero; 15 s out
-        # the body is already at its cruise depth (the base can be 2 tiles)
-        if not (pre <= 0.4 and post <= 0.4
-                and pre15 >= 0.5 and post15 >= 0.5):
-            sys.exit(f"surface window at {a}s lacks 15 s ramps "
-                     f"(pre {pre:.2f}/{pre15:.2f}, post {post:.2f}/{post15:.2f})")
-    # every second with the ring visible (depth < 1.5) is open water, both on
-    # the designed profile and on the asset's 20 s decimation
+    if outside:
+        k = [L for L in lens if not (SURF_MIN <= L <= SURF_MAX)][0]
+        sys.exit(f"surface: {outside} stored windows outside 10-20 s "
+                 f"(first {k}s)")
     open_s = (dist_s > D_SAFE) & (dep_s > SURF_DEPTH) & ~land_s
-    for label, dd in (("design", design_depth), ("baked", depth)):
-        ring = dd < 1.5
-        if not open_s[ring].all():
-            k = np.nonzero(ring & ~open_s)[0][0]
-            sys.exit(f"surface ({label}): depth {dd[k]:.2f} at t={k}s is not "
-                     f"open water (D={dist_s[k]:.1f}, seabed {dep_s[k]:.3f})")
-        log(f"surface ({label}): {int(ring.sum())} ring-visible seconds, all in "
-            f"open water (D > {D_SAFE:.0f}, seabed > {SURF_DEPTH})")
+    ring = visible
+    if not open_s[ring].all():
+        k = np.nonzero(ring & ~open_s)[0][0]
+        sys.exit(f"surface (stored): depth {depth[k]:.2f} at t={k}s is not "
+                 f"open water (D={dist_s[k]:.1f}, seabed {dep_s[k]:.3f})")
+    log(f"surface (stored): {int(ring.sum())} ring-visible seconds, all in "
+        f"open water (D > {D_SAFE:.0f}, seabed > {SURF_DEPTH})")
 
     # current-direction agreement with the shipped textures
     flow = decode_tex(Image.open(FLOW_PATH).convert("RGB"))
@@ -1617,8 +1331,8 @@ def make_preview(g, x, y, events, waypoints, path=PREVIEW_PATH):
         dr.ellipse((px - 2, py - 2, px + 2, py + 2), fill=(120, 245, 255))
     sx, sy = float(x[0]) / scale, float(y[0]) / scale
     dr.ellipse((sx - 7, sy - 7, sx + 7, sy + 7), outline=(255, 255, 255), width=2)
-    dr.text((10, 10), "whale route (7 d) - yellow line, white start ring, "
-            "cyan surface breaks, green waypoints", fill=(255, 255, 255))
+    dr.text((10, 10), "whale route (one tour, 50.1 h) - yellow line, white start "
+            "ring, cyan surface breaks, green waypoints", fill=(255, 255, 255))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     base.save(path)
     log(f"preview {path} {pw}x{ph}")
@@ -1656,7 +1370,7 @@ def chaikin_closed(g, poly, ratio=0.25, iterations=3):
     return p, survived
 
 
-def build(out_path):
+def build():
     global LOOP_SEC, COUNT
     t0 = time.time()
     log("loading fields")
@@ -1669,7 +1383,7 @@ def build(out_path):
     pts = pick_waypoints(g, rng, Pc)
     tour = order_tour(g, pts)
     corridor, legs, dropped, replanned, dup_edges = plan_corridor_disjoint(g, Pc, pts, tour)
-    route, survived = chaikin_closed(g, corridor, 0.25, 3)
+    route, survived = chaikin_closed(g, corridor, 0.25, 4)
     route = resample_poly(route, 10.0)
     # start the loop on the straightest sample, so the Catmull seam is not a
     # corner
@@ -1687,25 +1401,11 @@ def build(out_path):
     rec = to_records(sim["x"], sim["y"], zero)
     rec, turn_max, moved = relax_turn(rec, g, target=0.055)
     sx, sy, _, hh = sample_records(rec, LOOP_SEC)
-    dh = np.diff(np.unwrap(hh))
-    dh = np.concatenate([dh, [wrap_pi(hh[0] - hh[-1])]])
-    high = np.abs(dh) > 0.03
-    pad = 60
-    hi = np.concatenate([high[-pad:], high, high[:pad]])
-    hi = np.convolve(hi.astype(np.float64), np.ones(2 * pad + 1), mode="valid") > 0
-    col = np.clip(np.floor(sx + 0.5).astype(np.int64), 0, g.W - 1)
-    row = np.clip(np.floor(sy + 0.5).astype(np.int64), 0, g.H - 1)
-    open_pos = (g.dist[row, col] > D_SAFE) & (g.dep[row, col] > SURF_DEPTH) \
-        & (~hi[:len(sx)])
-    depths, events = depth_design(LOOP_SEC, open_pos,
-                                  np.random.default_rng(SEED + 2))
-    rec['d'] = np.clip(np.rint(depths[np.arange(COUNT) * DT] * 16.0),
-                       0, 255).astype('u1')
+    depths, events = record_depth_design(g, sx, sy,
+                                         np.random.default_rng(SEED + 2))
+    rec['d'] = np.clip(np.rint(depths * 16.0), 0, 255).astype('u1')
     raw, max_depth = pack_route(rec)
-    os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
-    with open(out_path, "wb") as f:
-        f.write(raw)
-    log(f"wrote {out_path} {len(raw)} bytes, maxDepth {max_depth}/16, "
+    log(f"built {len(raw)} bytes, maxDepth {max_depth}/16, "
         f"{time.time() - t0:.1f}s")
     return g, pts, rec, raw, depths, events, sim, b, legs, route, P, moved, turn_max, replanned, dup_edges, dropped
 
@@ -1723,14 +1423,27 @@ def main():
     SEED = args.seed & 0xFFFF
 
     t0 = time.time()
-    g, pts, rec, raw, depths, events, sim, bridge, legs, route, P, moved, turn_max, replanned, dup_edges, dropped = build(args.out)
+    g, pts, rec, raw, depths, events, sim, bridge, legs, route, P, moved, turn_max, replanned, dup_edges, dropped = build()
 
     if args.check:
         log("regenerating for determinism")
-        g2, pts2, rec2, raw2, depths2, events2, sim2, bridge2, legs2, route2, P2, moved2, turn2, repl2, dup2, dropped2 = build(args.out)
+        g2, pts2, rec2, raw2, depths2, events2, sim2, bridge2, legs2, route2, P2, moved2, turn2, repl2, dup2, dropped2 = build()
         if not (np.array_equal(rec, rec2) and raw == raw2):
             sys.exit("determinism: the second generation differs")
-        check_route(g, rec, depths, raw, raw2, args.out, bridge, pts, legs, route, P, moved, replanned, dup_edges, dropped)
+        tmp = args.out + ".tmp"
+        os.makedirs(os.path.dirname(os.path.abspath(tmp)), exist_ok=True)
+        with open(tmp, "wb") as f:
+            f.write(raw)
+        check_route(g, rec, raw, raw2, tmp, bridge, pts, legs,
+                    moved, replanned, dup_edges, dropped)
+        # every gate passed: publish atomically; run 2 never touched dist
+        os.replace(tmp, args.out)
+        log(f"published {args.out} ({len(raw)} bytes)")
+    else:
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        with open(args.out, "wb") as f:
+            f.write(raw)
+        log(f"wrote {args.out} ({len(raw)} bytes)")
 
     if not args.no_preview:
         x, y, _, _ = sample_records(rec, LOOP_SEC)
