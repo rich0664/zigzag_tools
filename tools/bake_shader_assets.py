@@ -34,6 +34,17 @@ from PIL import Image, ImageDraw
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WORK = os.path.join(ROOT, "out", "sea")
+
+# The four canonical inputs (map raster, height, currents, reference render)
+# live in data/ and are tracked with Git LFS, so a fresh clone builds without
+# re-deriving them. A bare working copy still falls back to out/sea/.
+DATA = os.path.join(ROOT, "data")
+
+
+def data_path(name):
+    p = os.path.join(DATA, name)
+    return p if os.path.exists(p) else os.path.join(WORK, name)
+
 DIST_DIR = os.path.join(ROOT, "dist")
 CONSTS = os.path.join(ROOT, "src", "sea-consts.json")
 
@@ -114,7 +125,7 @@ def save_webp(arr, path, method=6):
 
 def land_mask(w, h):
     """map.png alpha > 128, interior holes filled by flooding from the border."""
-    a = np.asarray(Image.open(os.path.join(WORK, "map.png")).convert("RGBA"))[..., 3]
+    a = np.asarray(Image.open(data_path("map.png")).convert("RGBA"))[..., 3]
     land_raw = a > 128
     m8 = np.zeros(land_raw.shape, np.uint8)
     m8[land_raw] = 255
@@ -141,7 +152,7 @@ def along_raw(dist):
 
 def depth_full(c, land):
     """1 - clamp((h - lo) / (hi - lo)), zeroed on land."""
-    h = np.load(os.path.join(WORK, "height_full.npy")).astype(np.float32)
+    h = np.load(data_path("height_full.npy")).astype(np.float32)
     lo, hi = float(c["heightLo"]), float(c["heightHi"])
     d = 1.0 - np.clip((h - lo) / (hi - lo), 0.0, 1.0)
     del h
@@ -251,7 +262,7 @@ def bake(c, allow_default_scale):
     aly = (aux[..., 2].astype(np.float32) / 255.0 * 2.0 - 1.0) * along_scale
 
     # ---- coarse flow ----------------------------------------------------
-    uv = np.load(os.path.join(WORK, "currents_uv.npy"))
+    uv = np.load(data_path("currents_uv.npy"))
     cu, cv, csp = coarse_flow(c, uv)
     flow = np.empty((fh, fw, 4), np.uint8)
     flow[..., 0] = enc01(cu * 0.5 + 0.5)

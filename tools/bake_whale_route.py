@@ -72,6 +72,17 @@ from PIL import Image, ImageDraw
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WORK = os.path.join(ROOT, "out", "sea")
+
+# The four canonical inputs (map raster, height, currents, reference render)
+# live in data/ and are tracked with Git LFS, so a fresh clone builds without
+# re-deriving them. A bare working copy still falls back to out/sea/.
+DATA = os.path.join(ROOT, "data")
+
+
+def data_path(name):
+    p = os.path.join(DATA, name)
+    return p if os.path.exists(p) else os.path.join(WORK, name)
+
 DIST_DIR = os.path.join(ROOT, "dist")
 CONSTS = os.path.join(ROOT, "src", "sea-consts.json")
 
@@ -189,7 +200,7 @@ class Guide:
         log(f"along peak {float(np.hypot(self.ax2, self.ay2).max()):.4f} "
             f"(scale {self.along_scale:.4f})")
 
-        uv = np.load(os.path.join(WORK, "currents_uv.npy"))
+        uv = np.load(data_path("currents_uv.npy"))
         self.cu, self.cv, _ = bsa.coarse_flow(c, uv)
         del uv
 
@@ -1417,7 +1428,7 @@ def check_route(g, rec, raw, raw2, path, bridge_start,
 def make_preview(g, x, y, events, waypoints, path=PREVIEW_PATH):
     scale = 5
     pw, ph = g.W // scale, g.H // scale
-    im = Image.open(os.path.join(WORK, "map.png")).convert("RGBA")
+    im = Image.open(data_path("map.png")).convert("RGBA")
     base = Image.new("RGBA", im.size, (24, 58, 82, 255))
     base.alpha_composite(im)
     base = base.convert("RGB").resize((pw, ph), Image.LANCZOS)

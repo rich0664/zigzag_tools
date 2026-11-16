@@ -28,7 +28,18 @@ import sea_core as sc
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORK = os.path.join(ROOT, "out", "sea")
-MAP_PNG = os.path.join(WORK, "map.png")
+
+# The four canonical inputs (map raster, height, currents, reference render)
+# live in data/ and are tracked with Git LFS, so a fresh clone builds without
+# re-deriving them. A bare working copy still falls back to out/sea/.
+DATA = os.path.join(ROOT, "data")
+
+
+def data_path(name):
+    p = os.path.join(DATA, name)
+    return p if os.path.exists(p) else os.path.join(WORK, name)
+
+MAP_PNG = data_path("map.png")
 PRESETS = os.path.join(WORK, "presets")
 SNAPSHOTS = os.path.join(WORK, "snapshots")
 PORT = 3007   # override with --port
@@ -451,7 +462,7 @@ def currents_field():
     """(2, ch, cw) unit current vectors, built once and kept on disk"""
     global _currents
     if _currents is None:
-        path = os.path.join(WORK, "currents_uv.npy")
+        path = data_path("currents_uv.npy")
         if os.path.exists(path):
             try:
                 arr = np.load(path)

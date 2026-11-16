@@ -15,8 +15,19 @@ import sea_core
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 WORK = os.path.join(ROOT, "out", "sea")
+
+# The four canonical inputs (map raster, height, currents, reference render)
+# live in data/ and are tracked with Git LFS, so a fresh clone builds without
+# re-deriving them. A bare working copy still falls back to out/sea/.
+DATA = os.path.join(ROOT, "data")
+
+
+def data_path(name):
+    p = os.path.join(DATA, name)
+    return p if os.path.exists(p) else os.path.join(WORK, name)
+
 MAP_URL = "https://d79e46apek3bq.cloudfront.net/maps/64/2026-11-01T22-21-31Z/map.png"
-MAP_PNG = os.path.join(WORK, "map.png")
+MAP_PNG = data_path("map.png")
 
 # window in map tiles, plus context so the distance field is correct at the edges
 X0, Y0, X1, Y1 = 2800, 2150, 4350, 3200
