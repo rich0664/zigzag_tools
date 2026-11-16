@@ -64,19 +64,29 @@ ellipsoid beyond the first pass.
 
 ## Time and sync
 
-- Wall-clock time is anchored once at script init:
-  `wallOffsetSec = Date.now()/1000 - performance.now()/1000`, and the live whale
-  time is `wallOffsetSec + performance.now()/1000`. This keeps every client on
-  the same wall clock while motion stays monotonic and rAF-smooth (a stepped
-  `Date.now()` would micro-stutter the body at high zoom). Re-anchor on
-  `visibilitychange` when returning to a background tab.
+- The clock is derived from a network reading when possible, with the local
+  clock as the fallback. At startup a same-origin `HEAD` to the current page
+  reads the `Date` header; with `performance.now()` timestamps around the
+  request, the server's "now" is taken as the header value plus half the round
+  trip. The `Date` header has 1 s resolution, so the total error is under a
+  second — under two tiles of travel at full speed, and invisible. No
+  third-party API, no CORS, one tiny request.
+- The offset is anchored once: `wallOffsetSec = serverNow - performance.now()/1000`,
+  and the live whale time is `wallOffsetSec + performance.now()/1000`. Motion is
+  monotonic and rAF-smooth; the offset keeps every client on the same wall
+  clock. Re-anchor on `visibilitychange` when returning to a background tab.
+- Policy: the fetch runs in parallel with the route and textures; the whale is
+  not shown before the sea is up, so it normally lands first. If it fails or
+  times out (~1.5 s), use the local clock. A late correction under ~1 s is
+  ignored; a larger one is eased in over a second or two rather than
+  teleporting the whale. `stats()` reports the source (`network` / `local`).
 - **Unix seconds never enter GLSL.** `float32` at 1.79e9 has a 128-second ULP;
   passing wall time to a shader would freeze the animation. JS does
   `t = wallClock mod loopDuration` and the route sampling in doubles, and passes
   only the evaluated pose to the shader. The shader's own `uTime` stays the
   existing seconds-since-load (or `debugRender`'s `t`), used by the wave ring.
-- No server, no storage, no per-user seed. A wrong clock moves the whale by the
-  clock error — acceptable.
+- No server, no storage, no per-user seed. A wrong local clock behind a failed
+  fetch moves the whale by the clock error — acceptable.
 
 ## Route asset
 
