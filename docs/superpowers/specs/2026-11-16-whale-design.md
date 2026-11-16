@@ -28,9 +28,12 @@ ellipsoid beyond the first pass.
   rows directly and the shader samples the same rows, so the whale's `y` is a
   texture row. A vertical-flip mistake is silent and self-consistent; the tests
   in this design exist to make it impossible.
-- The sea's world is texture-row tiles; `p` is the snapped sample, `world` the
-  continuous position. The whale is evaluated at **`world`** (unsnapped), so a
-  5-6 texel body glides smoothly; the seabed keeps its snap.
+- The sea's world is texture-row tiles; `p` is the snapped texel-centre sample,
+  `world` the continuous position. The whale **moves on `world`** (continuous,
+  smooth) and is **rendered on a texel grid anchored to itself**: its local body
+  coordinates are quantised to ~1-tile cells, so it is a 5-6 × 2-3 block pixel
+  creature whose blocks travel with it. It is **not** snapped to the map grid —
+  that would step one tile at a time. The ring uses the same local cell grid.
 
 ## Goals
 
@@ -193,6 +196,13 @@ trim all apply consistently and tiles occlude it on land.
   for the continuous seabed that shifts an off-centre object by tens of tiles,
   clips it against the 12-tile bounding-box gate, and distorts its size with
   zoom.
+- **Sprite-grid rendering (smooth motion, blocky pixels):** the body's local
+  coordinates are quantised to a cell grid anchored to the whale
+  (`lq = (floor(local / cell) + 0.5) * cell`, cell ≈ 1 tile); the ellipse,
+  `zTop`, normal and the hard mask are evaluated from `lq`. The pose itself
+  stays continuous, so the whole block pattern translates smoothly instead of
+  stepping with the map grid. The body's pixels are ~1-tile blocks; shading,
+  waterline and fog are flat per cell. The ring uses `lq` too.
 
 ### Fog and the ring
 
@@ -208,7 +218,7 @@ trim all apply consistently and tiles occlude it on land.
   waterline. Everything is multiplied by `surf` (from the depth ramp), so it
   fades in/out and never appears while diving in open water.
 - Bounding-box early exit: the whole block is skipped unless
-  `max(|world - whalePos|) < 12` tiles, which is a coherent branch on screen.
+  `max(|p - whalePos|) < 12` tiles, which is a coherent branch on screen.
 
 ### Debug seams
 
