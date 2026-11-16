@@ -218,6 +218,16 @@ trim all apply consistently and tiles occlude it on land.
 - Submerged body (`Zworld < 0`) fades toward the already-shaded `col`:
   `mix(body, col, 1 - exp(-submerged*0.22))`, and the surface grain is applied
   over it, so it reads as under the water, not pasted on glass.
+- **Depth tint:** the body takes the map's own depth palette (the `palette` node
+  in `tools/sea_editor.py`, preset `interesting_v1`: nine stops from
+  `[74,126,156]` at the shallowest to `[7,13,18]` at the deepest), sampled at
+  `t = whaleDepth / WHALE_MAX_DEPTH` and **normalised at the surface**
+  (`depthRamp(t) / depthRamp(0)`) so a breaching whale keeps its natural colour.
+  Applied after the fog as `bodyCol *= mix(vec3(1.0), tint, WHALE_TINT)` with
+  `WHALE_TINT = 0.7` — a partial multiply, so the shading and the body's own
+  colour stay readable rather than the palette swallowing them. The ring and the
+  waterline band are not tinted. The palette is mirrored in the shader; changing
+  it in the editor must be mirrored there too (or the ramp becomes a lookup).
 - Breached body (`Zworld > 0`) and the waterline sit above the grain; brightness
   and the reveal mask still apply.
 - The ring is the **coast effect with a shorter shore width**, not a different
