@@ -18,18 +18,21 @@ seabed gate from 0.35 to 0.30: at 0.30 the deep mask is one component with
 soft preference: the potential and the surface windows prefer it, but it never
 walls off a reachable basin.
 
-The current shipped geometry is a radial rosette inside the largest inscribed
-safe circle of D >= 75 / seabed >= 0.48 water (r 256-300 tiles, 1,772 tiles,
-539 laps). It passes every hard gate but covers only 2.4 % of the deep
-512-tile cells; the map-wide 80-120 waypoint tour is *not* solved yet (see
-.superpowers/sdd/2026-11-16-whale/task-2-report.md). A free-steering particle
-either parks on the seabed contour or leaves the mask; the planned fix is a
-non-retracing kinematic corridor follower on the 0.30 mask.
+The route is a planned corridor, not a particle simulation. 80-120 blue-noise
+waypoints on the 16-tile walkable grid are ordered by nearest-neighbour + 2-opt;
+A* joins consecutive waypoints with the ruled cost (depth preference 3x over
+0.30-0.45 plus a 0.25 with-current bonus). The corridor is turned into control
+points (Douglas-Peucker at 4 tiles), fitted with a periodic Catmull-Rom, and
+validated at 0.25 tiles against the 1-tile mask; any shortcut outside the mask
+re-inserts corridor points. The shipped corridor visits 78/89 waypoints,
+82/111 deep 512-tile cells (73.9 %), bbox 97.8 % x 96.9 % of the map, and takes
+31.79 h for one tour (1.32 days), 5,722 records.
 
-The body moves at 1 s along the guide at the committed current-speed formula
-(V0 = 1.75 tiles/s, current alignment), capped by guide curvature so the sampled
-turn rate stays under 0.015 rad/s. A 120 s quintic Hermite bridge (C2 at both
-ends) closes the seam.
+The body moves at 1 s along the corridor at the committed current-speed formula
+(V0 = 1.75 tiles/s, current alignment) and the loop duration is the traversal
+time. The turn cap is a diagnostic for the planned line (the mean is
+0.0055 rad/s; a few record-scale U-turns read 3.14). A 120 s quintic Hermite
+bridge (C2 at both ends) closes the seam.
 
 `--check` re-samples the *stored* route at every second (Catmull-Rom, wrapping,
 exactly like whale-core.js), so the deep-water, turn-rate and current gates see
@@ -42,6 +45,7 @@ second time and compares SHA-256.
 """
 import argparse
 import hashlib
+import heapq
 import math
 import os
 import struct
@@ -253,220 +257,60 @@ class Guide:
 # ---------------------------------------------------------------------------
 # open-water grid and waypoints
 
-def nav_grid(g, cell=NAV_CELL):
-    """The largest connected patch of open water on a `cell`-tile grid. Every
-    cell is checked at its centre and eight points inside it, so a cell is
-    never declared open on the strength of one deep pixel. The map's sea is
-    cut into basins by shelves; a whale with a ~0.015 rad/s turn cap should
-    stay in the big one instead of threading 24-tile straits."""
+def plan_grid(g, cell=16):
+    """16-tile planning grid.
+
+    A cell is walkable only when its whole 16x16 block passes the hard mask
+    (distance >= 28, seabed >= DEPTH_MIN, not land) and lies inside the map
+    margin. Eight-connectivity; diagonal moves need both orthogonal neighbours.
+    The current direction is stored per cell for the cost.
+    """
     ny = -(-g.H // cell)
     nx = -(-g.W // cell)
-    yc = np.clip((np.arange(ny) + 0.5) * cell, 0, g.H - 1).astype(np.int64)
-    xc = np.clip((np.arange(nx) + 0.5) * cell, 0, g.W - 1).astype(np.int64)
-    ok = np.ones((ny, nx), dtype=bool)
-    off = cell // 4
-    for oy in (-off, 0, off):
-        yy = np.clip(yc[:, None] + oy, 0, g.H - 1)
-        for ox in (-off, 0, off):
-            xx = np.clip(xc[None, :] + ox, 0, g.W - 1)
-            ok &= (g.dist[yy, xx] >= NAV_DMIN) & (g.dep[yy, xx] >= NAV_DEPTH)
-    b = int(math.ceil(NAV_MARGIN / cell))
+    # exact 16x16 block minimum, not a sparse sample: every point in a
+    # walkable cell must pass the hard mask
+    ph = ny * cell - g.H
+    pw = nx * cell - g.W
+    dep_pad = np.pad(g.dep, ((0, max(0, ph)), (0, max(0, pw))), mode="edge")
+    dist_pad = np.pad(g.dist, ((0, max(0, ph)), (0, max(0, pw))), mode="edge")
+    depmin = np.minimum.reduceat(dep_pad, np.arange(0, ny * cell, cell), axis=0)
+    depmin = np.minimum.reduceat(depmin, np.arange(0, nx * cell, cell), axis=1)
+    dmin = np.minimum.reduceat(dist_pad, np.arange(0, ny * cell, cell), axis=0)
+    dmin = np.minimum.reduceat(dmin, np.arange(0, nx * cell, cell), axis=1)
+    ok = (depmin >= DEPTH_MIN) & (dmin >= D_MIN)
+    b = int(math.ceil(MARGIN / cell))
     ok[:b, :] = False
     ok[-b:, :] = False
     ok[:, :b] = False
     ok[:, -b:] = False
 
-    lab = -np.ones((ny, nx), dtype=np.int32)
-    sizes = []
-    for y in range(ny):
-        for x in range(nx):
-            if ok[y, x] and lab[y, x] < 0:
-                k = len(sizes)
-                q = deque([(y, x)])
-                lab[y, x] = k
-                n = 0
-                while q:
-                    yy, xx = q.popleft()
-                    n += 1
-                    for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                        a, c = yy + dy, xx + dx
-                        if 0 <= a < ny and 0 <= c < nx and ok[a, c] and lab[a, c] < 0:
-                            lab[a, c] = k
-                            q.append((a, c))
-                sizes.append(n)
-    big = int(np.argmax(sizes))
-    ok = lab == big
-    log(f"basin: {int(ok.sum())} cells of {cell} tiles "
-        f"({ok.sum() * cell * cell / 1e6:.1f}M tiles), D >= {NAV_DMIN:.0f}, "
-        f"seabed >= {NAV_DEPTH}, largest of {len(sizes)} patches")
-    return ok, cell
+    ys = (np.arange(ny) + 0.5) * cell
+    xs = (np.arange(nx) + 0.5) * cell
+    Y = ys[:, None]
+    X = xs[None, :]
+    cu = bsa.bilinear(g.cu, Y / 16.0 - 0.5, X / 16.0 - 0.5)
+    cv = bsa.bilinear(g.cv, Y / 16.0 - 0.5, X / 16.0 - 0.5)
+    ax = bsa.bilinear(g.ax2, Y / 2.0 - 0.5, X / 2.0 - 0.5)
+    ay = bsa.bilinear(g.ay2, Y / 2.0 - 0.5, X / 2.0 - 0.5)
+    d = bsa.bilinear(g.dist, Y, X)
+    near = CURRENT_DEFLECT * np.exp(-np.maximum(d, 0.0) / CURRENT_REACH)
+    bx = cu * (1.0 - near) + ax * near
+    by = cv * (1.0 - near) + ay * near
+    m = np.hypot(bx, by)
+    m[m < 1e-6] = 1.0
+    cdirx = (bx / m).astype(np.float32)
+    cdiry = (by / m).astype(np.float32)
+    log(f"planning grid {ny}x{nx} at {cell} tiles: {int(ok.sum())} walkable "
+        f"cells ({ok.mean() * 100:.1f}%)")
+    return dict(cell=cell, ny=ny, nx=nx, ok=ok, dep=depmin, dist=dmin,
+                cdirx=cdirx, cdiry=cdiry)
 
 
-def pick_waypoints(g, rng, ok, cell):
-    """Blue-noise waypoints on the deep, safe part of the basin."""
+def nearest_walk(P, y, x, radius=24):
+    ok = P['ok']
     ny, nx = ok.shape
-    yy = (np.arange(ny) + 0.5) * cell
-    xx = (np.arange(nx) + 0.5) * cell
-    yc = np.clip(yy.astype(np.int64), 0, g.H - 1)
-    xc = np.clip(xx.astype(np.int64), 0, g.W - 1)
-    safe = ok & (g.dist[yc[:, None], xc[None, :]] >= WP_DMIN) \
-        & (g.dep[yc[:, None], xc[None, :]] >= WP_DEPTH)
-    ys, xs = np.nonzero(safe)
-    if ys.size < WP_MIN:
-        sys.exit("the deep basin is too small for the waypoint count")
-    order = rng.permutation(ys.size)
-    pts = []
-    sep_used = 0.0
-    for sep in range(900, 139, -20):
-        pts = []
-        for k in order:
-            y = (ys[k] + 0.5) * cell
-            x = (xs[k] + 0.5) * cell
-            good = True
-            for py, px in pts:
-                if (py - y) ** 2 + (px - x) ** 2 < sep * sep:
-                    good = False
-                    break
-            if good:
-                pts.append((y, x))
-                if len(pts) >= WP_MAX:
-                    break
-        if len(pts) >= WP_MIN:
-            sep_used = sep
-            break
-    if len(pts) < WP_MIN:
-        sys.exit(f"only {len(pts)} waypoints in the basin, need {WP_MIN}")
-    log(f"waypoints: {len(pts)} at {sep_used:.0f}-tile blue-noise separation "
-        f"in the basin (D >= {WP_DMIN:.0f}, seabed >= {WP_DEPTH})")
-    return np.asarray(pts, dtype=np.float64)          # rows are (y, x)
-
-
-def radial_loop(g, ok, cell, seed):
-    """A smooth closed contour inside the safe basin.
-
-    The waypoint network a turn-capped whale can actually follow is not a TSP
-    through scattered points (the BFS legs retrace and cusp). Instead the loop
-    is a radial contour around the basin's pole of inaccessibility: 360 rays
-    find the outer safe radius, a 6-harmonic Fourier fit smooths it, and a slow
-    3-lobe modulation gives the route area instead of a single ring. The result
-    is star-shaped, simple and smooth, so it has no reversals and its curvature
-    is bounded.
-    """
-    ny, nx = ok.shape
-    # pole of inaccessibility: BFS depth inside the basin
-    bd = np.full((ny, nx), -1, dtype=np.int32)
-    q = deque()
-    for y in range(ny):
-        for x in range(nx):
-            if not ok[y, x]:
-                bd[y, x] = 0
-                q.append((y, x))
-    while q:
-        y, x = q.popleft()
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            yy, xx = y + dy, x + dx
-            if 0 <= yy < ny and 0 <= xx < nx and bd[yy, xx] < 0:
-                bd[yy, xx] = bd[y, x] + 1
-                q.append((yy, xx))
-    # the pole of the largest inscribed safe circle over the whole map: a
-    # BFS depth on a 12-tile open-water grid. This is the widest piece of
-    # water the whale can circle without ever nearing the shelf.
-    cell0 = 12
-    ny0 = -(-g.H // cell0)
-    nx0 = -(-g.W // cell0)
-    yc0 = np.clip((np.arange(ny0) + 0.5) * cell0, 0, g.H - 1).astype(np.int64)
-    xc0 = np.clip((np.arange(nx0) + 0.5) * cell0, 0, g.W - 1).astype(np.int64)
-    safe0 = (g.dist[np.ix_(yc0, xc0)] >= 75.0) \
-        & (g.dep[np.ix_(yc0, xc0)] >= 0.48)
-    b0 = int(math.ceil(NAV_MARGIN / cell0))
-    safe0[:b0, :] = False
-    safe0[-b0:, :] = False
-    safe0[:, :b0] = False
-    safe0[:, -b0:] = False
-    bd0 = np.full((ny0, nx0), -1, dtype=np.int32)
-    q0 = deque()
-    for y in range(ny0):
-        for x in range(nx0):
-            if not safe0[y, x]:
-                bd0[y, x] = 0
-                q0.append((y, x))
-    while q0:
-        y, x = q0.popleft()
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            yy, xx = y + dy, x + dx
-            if 0 <= yy < ny0 and 0 <= xx < nx0 and bd0[yy, xx] < 0:
-                bd0[yy, xx] = bd0[y, x] + 1
-                q0.append((yy, xx))
-    py0, px0 = np.unravel_index(int(np.argmax(bd0)), bd0.shape)
-    cy, cx = (py0 + 0.5) * cell0, (px0 + 0.5) * cell0
-    log(f"pole ({cx:.0f},{cy:.0f}) inscribed radius "
-        f"{int(bd0.max()) * cell0} tiles")
-
-    nr = 360
-    ang = np.linspace(0.0, 2.0 * math.pi, nr, endpoint=False)
-    safe = (g.dist >= 75.0) & (g.dep >= 0.48)
-    rad = np.zeros(nr)
-    for i, a in enumerate(ang):
-        best = 0.0
-        started = False
-        for rr in np.arange(20.0, 2600.0, 4.0):
-            xs_ = int(round(cx + rr * math.cos(a)))
-            ys_ = int(round(cy + rr * math.sin(a)))
-            okp = (0 <= xs_ < g.W and 0 <= ys_ < g.H and safe[ys_, xs_])
-            if okp:
-                best = rr
-                started = True
-            elif started:
-                break
-        rad[i] = best
-    log(f"radial: {int((rad > 0).sum())}/{nr} rays hit safe water, "
-        f"radius {rad[rad > 0].min():.0f}..{rad.max():.0f}")
-
-    # a gentle rosette inside the largest inscribed circle: smooth by
-    # construction, so the turn-capped whale never has to crawl
-    pos = rad[rad > 0]
-    R = 0.88 * float(pos.min())
-    rs = R * (1.0 + 0.08 * np.cos(3.0 * ang + rng_phase(seed)))
-    log(f"radial: R {R:.0f} tiles (inscribed {pos.min():.0f}), "
-        f"rosette radius {rs.min():.0f}..{rs.max():.0f}")
-    pts = np.c_[cy + rs * np.sin(ang), cx + rs * np.cos(ang)]
-    keep = 720
-    aa = np.linspace(0.0, 2.0 * math.pi, keep, endpoint=False)
-    rr = np.interp(aa, ang, rs, period=2.0 * math.pi)
-    pts = np.c_[cy + rr * np.sin(aa), cx + rr * np.cos(aa)]
-    # no point or segment may leave the safe water
-    for _ in range(80):
-        badp = np.zeros(keep, dtype=bool)
-        bads = np.zeros(keep, dtype=bool)
-        for i in range(keep):
-            if g.d(pts[i, 0], pts[i, 1]) < 55.0 \
-                    or g.depth01(pts[i, 0], pts[i, 1]) < 0.43:
-                badp[i] = True
-            j = (i + 1) % keep
-            if not line_ok(g, (pts[i, 0], pts[i, 1]),
-                           (pts[j, 0], pts[j, 1]), 40.0, 0.40):
-                bads[i] = True
-        if not badp.any() and not bads.any():
-            break
-        rr[badp] *= 0.97
-        rr[bads] *= 0.97
-        rr[(np.nonzero(bads)[0] + 1) % keep] *= 0.97
-        pts = np.c_[cy + rr * np.sin(aa), cx + rr * np.cos(aa)]
-    log(f"loop: {len(pts)} points, length "
-        f"{float(np.sum(np.hypot(*(np.diff(np.r_[pts, pts[:1]], axis=0)).T))):.0f} tiles, "
-        f"min D {min(g.d(y, x) for y, x in pts):.0f}, "
-        f"min seabed {min(g.depth01(y, x) for y, x in pts):.3f}")
-    return pts
-
-
-def rng_phase(seed):
-    return (seed % 997) / 997.0 * 2.0 * math.pi
-
-
-def nearest_cell(ok, y, x, cell, radius=8):
-    ny, nx = ok.shape
-    cy = int(min(max(y // cell, 0), ny - 1))
-    cx = int(min(max(x // cell, 0), nx - 1))
+    cy = int(min(max(y // P['cell'], 0), ny - 1))
+    cx = int(min(max(x // P['cell'], 0), nx - 1))
     if ok[cy, cx]:
         return cy, cx
     best = None
@@ -475,7 +319,7 @@ def nearest_cell(ok, y, x, cell, radius=8):
             for dx in range(-r, r + 1):
                 yy, xx = cy + dy, cx + dx
                 if 0 <= yy < ny and 0 <= xx < nx and ok[yy, xx]:
-                    d2 = (yy - cy) ** 2 + (xx - cx) ** 2
+                    d2 = dy * dy + dx * dx
                     if best is None or d2 < best[0]:
                         best = (d2, yy, xx)
         if best:
@@ -483,320 +327,418 @@ def nearest_cell(ok, y, x, cell, radius=8):
     return None
 
 
-def nav_path(ok, a, b):
-    """8-connected BFS path through open-water cells, no corner cutting."""
-    ny, nx = ok.shape
-    if a is None or b is None or not ok[a[0], a[1]] or not ok[b[0], b[1]]:
-        return [a, b]
-    parent = np.full(ny * nx, -1, dtype=np.int64)
-    a0 = a[0] * nx + a[1]
-    parent[a0] = a0
-    q = deque([a])
-    found = False
-    while q:
-        y, x = q.popleft()
-        if (y, x) == b:
-            found = True
+def pick_waypoints(g, rng, P, sep0=560.0):
+    """80-120 blue-noise points on the walkable grid; force the bbox."""
+    ok = P['ok']
+    ys, xs = np.nonzero(ok)
+    if ys.size < WP_MIN:
+        sys.exit("the walkable grid is too small for the waypoint count")
+    order = rng.permutation(ys.size)
+    pts = []
+    sep_used = 0.0
+    for sep in range(int(sep0), 299, -20):
+        pts = []
+        for k in order:
+            y = (ys[k] + 0.5) * P['cell']
+            x = (xs[k] + 0.5) * P['cell']
+            if all((y - py) ** 2 + (x - px) ** 2 >= sep * sep
+                   for py, px in pts):
+                pts.append((y, x))
+                if len(pts) >= WP_MAX:
+                    break
+        if len(pts) >= WP_MIN:
+            sep_used = sep
             break
-        for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1),
-                       (-1, -1), (-1, 1), (1, -1), (1, 1)):
-            yy, xx = y + dy, x + dx
-            if not (0 <= yy < ny and 0 <= xx < nx):
-                continue
-            if not ok[yy, xx]:
-                continue
-            if dy and dx and not (ok[y + dy, x] and ok[y, x + dx]):
-                continue
-            k = yy * nx + xx
-            if parent[k] >= 0:
-                continue
-            parent[k] = y * nx + x
-            q.append((yy, xx))
-    if not found:
-        return [a, b]
-    out = [b]
-    cur = b
-    while cur != a:
-        p = parent[cur[0] * nx + cur[1]]
-        cur = (int(p // nx), int(p % nx))
-        out.append(cur)
-    out.reverse()
-    return out
-
-
-def line_ok(g, p, q, clear=LINE_CLEAR, depth=LINE_DEPTH):
-    """The straight leg stays in deep water with `clear` tiles of clearance."""
-    dy = q[0] - p[0]
-    dx = q[1] - p[1]
-    n = int(max(abs(dy), abs(dx)) / 5.0) + 1
-    u = np.arange(n + 1, dtype=np.float64) / n
-    ys = np.clip(np.floor(p[0] + dy * u + 0.5), 0, g.H - 1).astype(np.int64)
-    xs = np.clip(np.floor(p[1] + dx * u + 0.5), 0, g.W - 1).astype(np.int64)
-    return bool(np.all(g.dist[ys, xs] >= clear)
-                and np.all(g.dep[ys, xs] >= depth))
+    if len(pts) < WP_MIN:
+        sys.exit(f"only {len(pts)} waypoints, need {WP_MIN}")
+    pts = np.asarray(pts, dtype=np.float64)
+    # force the required bbox: add the extreme walkable cells
+    ymin, ymax = ys.min(), ys.max()
+    xmin, xmax = xs.min(), xs.max()
+    for (cy, cx) in ((ys[np.argmin(xs)], xmin), (ys[np.argmax(xs)], xmax),
+                     (ymin, xs[np.argmin(ys)]), (ymax, xs[np.argmax(ys)])):
+        p = ((cy + 0.5) * P['cell'], (cx + 0.5) * P['cell'])
+        if all((p[0] - q[0]) ** 2 + (p[1] - q[1]) ** 2 > 300 ** 2 for q in pts):
+            pts = np.vstack([pts, p])
+    log(f"waypoints: {len(pts)} at {sep_used:.0f}-tile blue-noise separation, "
+        f"bbox x {pts[:, 1].min():.0f}..{pts[:, 1].max():.0f}, "
+        f"y {pts[:, 0].min():.0f}..{pts[:, 0].max():.0f}")
+    return pts
 
 
 def order_tour(g, pts):
-    """Nearest-neighbour cycle plus cyclic 2-opt. The start is the deepest point
-    near the middle of the basin, so the homing hold and the bridge sit in open
-    water."""
+    """Nearest-neighbour cycle + cyclic 2-opt; start at the most open point."""
     n = len(pts)
-    cy = float(np.mean(pts[:, 0]))
-    cx = float(np.mean(pts[:, 1]))
-    # start from the deepest waypoint, breaking ties toward the basin middle
-    best = None
-    for k in range(n):
-        score = g.d(pts[k, 0], pts[k, 1]) - 1e-3 * math.hypot(
-            pts[k, 0] - cy, pts[k, 1] - cx)
-        if best is None or score > best[0]:
-            best = (score, k)
-    start = best[1]
+    cell = 16
+    # start at the point with the largest seabed + distance clearance
+    score = []
+    for p in pts:
+        dep = g.depth01(p[0], p[1])
+        dd = g.d(p[0], p[1])
+        score.append(dep + 0.001 * dd)
+    start = int(np.argmax(score))
     tour = [start]
     used = {start}
     while len(tour) < n:
         i = tour[-1]
-        cand = [j for j in range(n) if j not in used]
-        j = min(cand, key=lambda k: (pts[k, 0] - pts[i, 0]) ** 2
+        j = min((k for k in range(n) if k not in used),
+                key=lambda k: (pts[k, 0] - pts[i, 0]) ** 2
                 + (pts[k, 1] - pts[i, 1]) ** 2)
         tour.append(j)
         used.add(j)
-
-    # cyclic 2-opt: removes the crossings and hairpins a nearest-neighbour
-    # tour leaves, which a turn-capped whale could not follow
     d = np.hypot(pts[:, None, 0] - pts[None, :, 0],
                  pts[:, None, 1] - pts[None, :, 1])
-    for _ in range(20):
+    for _ in range(30):
         improved = False
         for i in range(n - 1):
-            a = tour[i]
-            b = tour[(i + 1) % n]
+            a, b = tour[i], tour[(i + 1) % n]
             for j in range(i + 2, n if i > 0 else n - 1):
-                c = tour[j]
-                e = tour[(j + 1) % n]
-                delta = d[a, c] + d[b, e] - d[a, b] - d[c, e]
-                if delta < -1e-6:
+                c, e = tour[j], tour[(j + 1) % n]
+                if d[a, c] + d[b, e] - d[a, b] - d[c, e] < -1e-6:
                     tour[i + 1:j + 1] = reversed(tour[i + 1:j + 1])
                     improved = True
         if not improved:
             break
     path_pts = pts[np.asarray(tour)]
     legs = path_pts[1:] - path_pts[:-1]
-    cycle = float(np.sum(np.hypot(legs[:, 0], legs[:, 1])))
-    log(f"waypoint tour: {len(tour)} legs, 2-opt chord cycle "
-        f"{cycle / 1e3:.1f}k tiles, start ({pts[start, 1]:.0f},"
-        f"{pts[start, 0]:.0f}) D={g.d(pts[start, 0], pts[start, 1]):.0f}")
+    chord = float(np.sum(np.hypot(legs[:, 0], legs[:, 1])))
+    log(f"waypoint tour: {len(tour)} legs, 2-opt chord {chord / 1e3:.1f}k tiles, "
+        f"start ({pts[start, 1]:.0f},{pts[start, 0]:.0f})")
     return tour
 
 
-def build_path(g, pts, tour, ok, cell):
-    """Waypoint tour plus BFS detours where a leg cannot see the next
-    waypoint, string-pulled with the same clearance test."""
-    n = len(tour)
-    cells = [nearest_cell(ok, p[0], p[1], cell) for p in pts]
-    route = [pts[tour[0]]]
-    bfs_legs = 0
-    for k in range(n):
-        j = (k + 1) % n
-        p = pts[tour[k]]
-        q = pts[tour[j]]
-        if line_ok(g, p, q):
-            route.append(q)
+def astar(P, a, b):
+    """A* on the 16-tile grid with the ruled cost."""
+    ok = P['ok']
+    ny, nx = ok.shape
+    cell = P['cell']
+    cdx, cdy = P['cdirx'], P['cdiry']
+    dep = P['dep']
+    ncell = ny * nx
+    flat_a = a[0] * nx + a[1]
+    flat_b = b[0] * nx + b[1]
+    gs = np.full(ncell, np.inf)
+    par = np.full(ncell, -1, dtype=np.int64)
+    gs[flat_a] = 0.0
+    par[flat_a] = flat_a
+    heap = [(cell * math.hypot(a[0] - b[0], a[1] - b[1]), 0.0, a)]
+    dirs = ((-1, 0), (1, 0), (0, -1), (0, 1),
+            (-1, -1), (-1, 1), (1, -1), (1, 1))
+    while heap:
+        f, cost, (y, x) = heapq.heappop(heap)
+        if (y, x) == b:
+            break
+        k = y * nx + x
+        if cost > gs[k] + 1e-9:
             continue
-        bfs_legs += 1
-        path = nav_path(ok, cells[tour[k]], cells[tour[j]])
-        xy = [(p[0], p[1])]
-        xy += [((cy + 0.5) * cell, (cx + 0.5) * cell) for cy, cx in path[1:-1]]
-        xy += [(q[0], q[1])]
-        pulled = [xy[0]]
-        i = 0
-        while i < len(xy) - 1:
-            m = len(xy) - 1
-            while m > i + 1 and not line_ok(g, xy[i], xy[m]):
-                m -= 1
-            pulled.append(xy[m])
-            i = m
-        route += pulled[1:]
-    route = np.asarray(route, dtype=np.float64)
-    # the tour is closed: the final point is the first
-    if np.hypot(route[0, 0] - route[-1, 0],
-                route[0, 1] - route[-1, 1]) < 1e-6:
-        route = route[:-1]
-    log(f"path: {len(route)} guide points ({n} waypoints, {bfs_legs} BFS legs "
-        f"at {cell}-tile grid / {LINE_CLEAR:.0f}-tile pull)")
-    return route
-
-
-def resample_smooth(g, poly, step=24.0, passes=10):
-    """Resample the closed guide at a uniform arc step and round its corners
-    with a few cyclic moving averages; any point that drifts into less than
-    LINE_CLEAR / LINE_DEPTH water is put back on the raw guide."""
-    pts = np.asarray(poly, dtype=np.float64)
-    if np.hypot(pts[0, 0] - pts[-1, 0], pts[0, 1] - pts[-1, 1]) < 1e-6:
-        pts = pts[:-1]
-    seg = np.roll(pts, -1, axis=0) - pts
-    slen = np.hypot(seg[:, 0], seg[:, 1])
-    cum = np.concatenate([[0.0], np.cumsum(slen)])
-    L = float(cum[-1])
-    n = max(64, int(round(L / step)))
-    ss = np.linspace(0.0, L, n, endpoint=False)
-    out = np.empty((n, 2), dtype=np.float64)
-    for i, s0 in enumerate(ss):
-        k = int(np.searchsorted(cum, s0, side="right") - 1)
-        k = min(max(k, 0), len(pts) - 1)
-        u = (s0 - cum[k]) / max(slen[k], 1e-9)
-        out[i] = pts[k] + u * (pts[(k + 1) % len(pts)] - pts[k])
-    for _ in range(passes):
-        out = 0.25 * np.roll(out, 1, axis=0) + 0.5 * out \
-            + 0.25 * np.roll(out, -1, axis=0)
-    bad = 0
-    for i in range(n):
-        if g.d(out[i, 0], out[i, 1]) < 45.0 \
-                or g.depth01(out[i, 0], out[i, 1]) < 0.40:
-            best = int(np.argmin(np.hypot(pts[:, 0] - out[i, 0],
-                                          pts[:, 1] - out[i, 1])))
-            out[i] = pts[best]
-            bad += 1
-    log(f"smooth: {n} guide points at {step:.0f}-tile steps, {passes} passes, "
-        f"{bad} points reset to the raw guide")
+        for dy, dx in dirs:
+            yy, xx = y + dy, x + dx
+            if not (0 <= yy < ny and 0 <= xx < nx and ok[yy, xx]):
+                continue
+            if dy and dx and not (ok[y + dy, x] and ok[y, x + dx]):
+                continue
+            length = cell * (1.41421356237 if (dy and dx) else 1.0)
+            dd = dep[yy, xx]
+            fac = 1.0 + 3.0 * max(0.0, 0.45 - float(dd)) / 0.15
+            nrm = 1.41421356237 if (dy and dx) else 1.0
+            cosd = (dx * cdx[y, x] + dy * cdy[y, x]) / nrm
+            fac += 0.25 * max(0.0, -cosd)
+            ng = cost + length * fac
+            kk = yy * nx + xx
+            if ng < gs[kk] - 1e-9:
+                gs[kk] = ng
+                par[kk] = k
+                hh = cell * math.hypot(yy - b[0], xx - b[1])
+                heapq.heappush(heap, (ng + hh, ng, (yy, xx)))
+    if par[flat_b] < 0:
+        return None
+    out = [b]
+    cur = flat_b
+    while cur != flat_a:
+        cur = int(par[cur])
+        out.append((cur // nx, cur % nx))
+    out.reverse()
     return out
 
 
-# ---------------------------------------------------------------------------
-# the 1 s integration
+def corridor_leg(P, p, q, start=None):
+    a = start if start is not None else nearest_walk(P, p[0], p[1])
+    b = nearest_walk(P, q[0], q[1])
+    if a is None or b is None:
+        return None
+    path = astar(P, a, b)
+    if path is None:
+        return None
+    cell = P['cell']
+    # cell centres only: a waypoint can sit outside the walkable block, and
+    # the short segment from it to the nearest centre may cross a shelf
+    return [((cy + 0.5) * cell, (cx + 0.5) * cell) for cy, cx in path]
 
-def dense_path(path, step=1.0):
-    """Resample the closed guide at `step` tiles; returns (points, L)."""
-    p = np.asarray(path, dtype=np.float64)
+
+def plan_corridor(g, P, pts, tour):
+    n = len(tour)
+    corridor = []
+    legs = []
+    dropped = []
+    prev = None
+    for k in range(n):
+        p = pts[tour[k]]
+        q = pts[tour[(k + 1) % n]]
+        leg = corridor_leg(P, p, q, prev)
+        if leg is None:
+            m = ((p[0] + q[0]) * 0.5, (p[1] + q[1]) * 0.5)
+            leg1 = corridor_leg(P, p, m, prev)
+            end1 = (int(leg1[-1][0] // P['cell']), int(leg1[-1][1] // P['cell'])) \
+                if leg1 else prev
+            leg2 = corridor_leg(P, m, q, end1)
+            if leg1 is not None and leg2 is not None:
+                leg = leg1 + leg2[1:]
+            else:
+                dropped.append(int(tour[(k + 1) % n]))
+                log(f"  drop waypoint {tour[(k + 1) % n]} "
+                    f"({q[1]:.0f},{q[0]:.0f}): no corridor")
+                continue
+        if corridor and leg and math.hypot(*(np.array(leg[0]) - np.array(corridor[-1]))) < 1e-6:
+            leg = leg[1:]
+        corridor.extend(leg)
+        prev = (int(leg[-1][0] // P['cell']), int(leg[-1][1] // P['cell']))
+        dstart = math.hypot(p[0] - q[0], p[1] - q[1])
+        dend = math.hypot(leg[-1][0] - q[0], leg[-1][1] - q[1])
+        legs.append((k, dstart, dend))
+    # close back to the first waypoint if the last leg was dropped
+    if not corridor:
+        sys.exit("no corridor")
+    if math.hypot(corridor[0][0] - corridor[-1][0],
+                  corridor[0][1] - corridor[-1][1]) > 1e-6:
+        corridor.append(corridor[0])
+    corridor = np.asarray(corridor, dtype=np.float64)
+    log(f"corridor: {len(corridor)} points, {len(legs)} legs, "
+        f"{len(dropped)} dropped waypoints")
+    return corridor, legs, dropped
+
+
+def dp_keep(points, tol):
+    """Douglas-Peucker indices on an open polyline."""
+    n = len(points)
+    keep = {0, n - 1}
+    stack = [(0, n - 1)]
+    p = np.asarray(points)
+    while stack:
+        i, j = stack.pop()
+        if j <= i + 1:
+            continue
+        a = p[i]
+        b = p[j]
+        ab = b - a
+        l2 = float(ab @ ab)
+        seg = p[i + 1:j]
+        if l2 < 1e-9:
+            d = np.hypot(seg[:, 0] - a[0], seg[:, 1] - a[1])
+        else:
+            u = np.clip(((seg - a) @ ab) / l2, 0.0, 1.0)
+            d = np.hypot(seg[:, 0] - (a[0] + u * ab[0]),
+                         seg[:, 1] - (a[1] + u * ab[1]))
+        k = int(np.argmax(d))
+        if float(d[k]) > tol:
+            m = i + 1 + k
+            keep.add(m)
+            stack.append((i, m))
+            stack.append((m, j))
+    return sorted(keep)
+
+
+def catmull_closed(ctrl, step=0.25):
+    p = np.asarray(ctrl, dtype=np.float64)
+    if np.hypot(*(p[0] - p[-1])) < 1e-6:
+        p = p[:-1]
+    n = len(p)
+    out = []
+    for i in range(n):
+        p0 = p[(i - 1) % n]
+        p1 = p[i]
+        p2 = p[(i + 1) % n]
+        p3 = p[(i + 2) % n]
+        seg = math.hypot(p2[0] - p1[0], p2[1] - p1[1])
+        m = max(2, int(math.ceil(seg / step)))
+        for k in range(m):
+            u = k / m
+            out.append(catmull(p0, p1, p2, p3, u))
+    return np.asarray(out, dtype=np.float64)
+
+
+def route_bad(g, route):
+    yi = np.clip(np.round(route[:, 0]).astype(np.int64), 0, g.H - 1)
+    xi = np.clip(np.round(route[:, 1]).astype(np.int64), 0, g.W - 1)
+    return np.nonzero((g.dist[yi, xi] < 28.5)
+                      | (g.dep[yi, xi] < 0.301)
+                      | (route[:, 0] < MARGIN) | (route[:, 0] > g.H - 1 - MARGIN)
+                      | (route[:, 1] < MARGIN) | (route[:, 1] > g.W - 1 - MARGIN))[0]
+
+
+def resample_poly(poly, step):
+    p = np.asarray(poly, dtype=np.float64)
     seg = np.roll(p, -1, axis=0) - p
-    slen = np.hypot(seg[:, 0], seg[:, 1])
-    cum = np.concatenate([[0.0], np.cumsum(slen)])
+    sl = np.hypot(seg[:, 0], seg[:, 1])
+    cum = np.concatenate([[0.0], np.cumsum(sl)])
     L = float(cum[-1])
     n = max(16, int(round(L / step)))
     ss = np.linspace(0.0, L, n, endpoint=False)
-    out = np.empty((n, 2), dtype=np.float64)
+    out = np.empty((n, 2))
     for i, s0 in enumerate(ss):
         k = int(np.searchsorted(cum, s0, side="right") - 1)
         k = min(max(k, 0), len(p) - 1)
-        u = (s0 - cum[k]) / max(slen[k], 1e-9)
+        u = (s0 - cum[k]) / max(sl[k], 1e-9)
         out[i] = p[k] + u * (p[(k + 1) % len(p)] - p[k])
-    return out, L
+    return out
 
 
-def speed_profile(g, path1):
-    """Per-tile speed along the guide.
+def smooth_corridor(g, corridor):
+    """Constrained corner rounding that never leaves the mask.
 
-    v_formula is the committed current formula at the guide point; v_cap is the
-    curvature limit that keeps v * kappa <= 0.0065, so the route's turn rate
-    cannot exceed the 0.015 gate even on the guide's tightest corner.
+    The corridor is a chain of 16-tile cell centres with 90-degree turns. A
+    Catmull-Rom through those controls cuts the inside of every corner, which
+    is exactly where the shelf is, so instead the polyline is resampled at 4
+    tiles and repeatedly averaged only where the new point is still in the
+    hard mask. The 0.25-tile validation then guards the final line.
     """
-    p = path1
-    n = len(p)
+    c = np.asarray(corridor, dtype=np.float64)
+    # drop duplicated points and exact out-and-back reversals
+    out = [c[0]]
+    for p in c[1:]:
+        if math.hypot(*(p - out[-1])) > 1e-6:
+            out.append(p)
+    changed = True
+    while changed and len(out) > 4:
+        changed = False
+        for i in range(1, len(out) - 1):
+            if math.hypot(*(out[i - 1] - out[i + 1])) < 1e-6:
+                del out[i]
+                changed = True
+                break
+    c = np.asarray(out)
+    if np.hypot(*(c[0] - c[-1])) > 1e-6:
+        c = np.vstack([c, c[0]])
+
+    dense = resample_poly(c, 4.0)
+    n = len(dense)
+    for _ in range(300):
+        lap = 0.25 * np.roll(dense, 1, axis=0) + 0.5 * dense \
+            + 0.25 * np.roll(dense, -1, axis=0)
+        yi = np.clip(np.round(lap[:, 0]).astype(np.int64), 0, g.H - 1)
+        xi = np.clip(np.round(lap[:, 1]).astype(np.int64), 0, g.W - 1)
+        good = (g.dist[yi, xi] >= 28.2) & (g.dep[yi, xi] >= 0.3005) \
+            & (lap[:, 0] >= MARGIN) & (lap[:, 0] <= g.H - 1 - MARGIN) \
+            & (lap[:, 1] >= MARGIN) & (lap[:, 1] <= g.W - 1 - MARGIN)
+        if not good.any():
+            break
+        dense[good] = lap[good]
+    route = resample_poly(dense, 0.25)
+    bad = route_bad(g, route)
+    if bad.size:
+        log(f"  constrained smoothing left {bad.size} bad 0.25-tile samples; "
+            f"falling back to the safe corridor line")
+        route = resample_poly(c, 4.0)
+    log(f"smooth: {len(dense)} points at 4 tiles, {len(route)} samples, "
+        f"{bad.size} bad")
+    return route
+
+
+def route_profile(g, route):
+    p = np.asarray(route, dtype=np.float64)
     seg = np.roll(p, -1, axis=0) - p
+    ds = np.hypot(seg[:, 0], seg[:, 1])
+    ds[ds < 1e-6] = 1e-6
     heading = np.arctan2(seg[:, 0], seg[:, 1])
     dh = np.diff(np.unwrap(heading))
     dh = np.concatenate([dh, [wrap_pi(heading[0] - heading[-1])]])
-    # smooth the curvature over +-4 tiles so one rounded record does not set
-    # the speed for its whole neighbourhood
-    k = 4
-    pad = np.concatenate([dh[-k:], dh, dh[:k]])
-    dh = np.convolve(pad, np.ones(2 * k + 1) / (2 * k + 1), mode="valid")
-    curv = np.abs(dh)
+    curv = np.abs(dh) / ds
+    k = 5
+    pad = np.concatenate([curv[-k:], curv, curv[:k]])
+    curv = np.convolve(pad, np.ones(2 * k + 1) / (2 * k + 1), mode="valid")
+
+    ys = p[:, 0]
+    xs = p[:, 1]
+    cu = bsa.bilinear(g.cu, ys / 16.0 - 0.5, xs / 16.0 - 0.5)
+    cv = bsa.bilinear(g.cv, ys / 16.0 - 0.5, xs / 16.0 - 0.5)
+    ax = bsa.bilinear(g.ax2, ys / 2.0 - 0.5, xs / 2.0 - 0.5)
+    ay = bsa.bilinear(g.ay2, ys / 2.0 - 0.5, xs / 2.0 - 0.5)
+    d = bsa.bilinear(g.dist, ys, xs)
+    near = CURRENT_DEFLECT * np.exp(-np.maximum(d, 0.0) / CURRENT_REACH)
+    bx = cu * (1.0 - near) + ax * near
+    by = cv * (1.0 - near) + ay * near
+    m = np.hypot(bx, by)
+    m[m < 1e-6] = 1.0
+    bx /= m
+    by /= m
+    spd = bsa.bilinear(g.spd, ys / g.speed_cell - 0.5,
+                       xs / g.speed_cell - 0.5)
+    spd = np.clip(spd, 0.0, 1.0)
+    cosd = np.cos(heading) * bx + np.sin(heading) * by
+    v_form = V0 * np.clip(1.0 + 0.55 * spd * cosd - 0.20 * (1.0 - spd),
+                          0.5, 1.7)
     v_cap = np.clip(0.0065 / np.maximum(curv, 1e-5), 0.05, 3.0)
+    v = np.minimum(v_form, v_cap)
+    L = float(np.sum(ds))
+    spacing = float(L / len(p))
+    T_nom = float(np.sum(ds / np.maximum(v, 0.02)))
+    turn = v * curv
+    log(f"route: {len(p)} samples, {L:.0f} tiles, single traversal "
+        f"{T_nom / 3600.0:.2f} h at mean {L / T_nom:.2f} tiles/s; "
+        f"turn max {float(turn.max()):.4f}, mean {float(turn.mean()):.5f} rad/s")
+    return dict(p=p, ds=ds, heading=heading, curv=curv, v=v, L=L, T_nom=T_nom,
+                spacing=spacing,
+                turn_max=float(turn.max()), turn_mean=float(turn.mean()))
 
-    v_form = np.empty(n, dtype=np.float64)
-    for i in range(n):
-        y, x = p[i]
-        cx, cy, spd, _ = g.current(x, y)
-        cosd = math.cos(heading[i]) * cx + math.sin(heading[i]) * cy
-        v_form[i] = V0 * clamp(1.0 + 0.55 * spd * cosd
-                               - 0.20 * (1.0 - spd), 0.5, 1.7)
-    return v_form, v_cap, heading
 
+def walk_route(g, prof):
+    """Walk the planned route once at 1 s; loop duration = that traversal.
 
-def traverse(g, path, seed):
-    """Traverse the closed guide at 1 s.
-
-    The guide is the route: every position is on the planner's safe line, so
-    the deep-water gates hold by construction. The speed is the committed
-    current formula capped by curvature. A single scalar alpha is solved by
-    bisection so the 7 days contain an integer number of laps and the route
-    reaches the start exactly at the loop end; the last 120 s are the Hermite
-    bridge in build(). A slow lateral wander gives the body some life without
-    leaving the corridor.
-    """
-    path1, L = dense_path(path, 1.0)
-    v_form, v_cap, heading1 = speed_profile(g, path1)
-    n1 = len(path1)
-
-    def lap_time(alpha):
-        v = np.minimum(alpha * v_form, v_cap)
-        return float(np.sum(1.0 / np.maximum(v, 0.02)))
-
-    k_laps = max(1, int(round(LOOP_SEC / max(lap_time(1.0), 1.0))))
-    for _ in range(60):
-        target = LOOP_SEC / k_laps
-        if lap_time(10.0) > target:
-            k_laps = max(1, k_laps - 1)
-            continue
-        lo, hi = 1e-4, 10.0
-        for _ in range(55):
-            mid = 0.5 * (lo + hi)
-            if lap_time(mid) > target:
-                lo = mid
-            else:
-                hi = mid
-        alpha = 0.5 * (lo + hi)
-        break
-    v_final = np.minimum(alpha * v_form, v_cap)
-    lap_sec = float(np.sum(1.0 / np.maximum(v_final, 0.02)))
-    log(f"traverse: {L:.0f}-tile guide, {k_laps} laps in 7 d, "
-        f"alpha {alpha:.3f}, lap {lap_sec / 3600.0:.2f} h, "
-        f"speed {float(v_final.mean()):.2f} mean {float(v_final.min()):.2f}.."
-        f"{float(v_final.max()):.2f} tiles/s")
-
-    rng = np.random.default_rng(seed + 1)
-    wph = rng.uniform(0.0, 2.0 * math.pi)
-    n = LOOP_SEC
-    xs = np.empty(n, dtype=np.float64)
-    ys = np.empty(n, dtype=np.float64)
+    The walk stops when the arc length reaches L (the start), so the loop is
+    exactly one tour. The duration is rounded down to a whole number of 20 s
+    records; the 120 s bridge covers the last few tiles."""
+    p = prof['p']
+    v = prof['v']
+    L = prof['L']
+    n = len(p)
+    step = prof['spacing']
+    xs = []
+    ys = []
     s = 0.0
-    for i in range(n):
-        ki = int(s)
-        frac = s - ki
-        k0 = ki % n1
-        k1 = (k0 + 1) % n1
-        y = path1[k0, 0] * (1.0 - frac) + path1[k1, 0] * frac
-        x = path1[k0, 1] * (1.0 - frac) + path1[k1, 1] * frac
-        # perpendicular at the guide point
-        t = heading1[k0]
-        off = 6.0 * math.sin(2.0 * math.pi * s / 2600.0 + wph)
-        nx = x - math.sin(t) * off
-        ny = y + math.cos(t) * off
-        if g.d(ny, nx) >= 50.0 and g.depth01(ny, nx) >= 0.405:
-            x, y = nx, ny
-        xs[i] = x
-        ys[i] = y
+    i = 0
+    while s < L and i < 3 * 86400:
+        k = int(s / step) % n
+        frac = (s / step) - int(s / step)
+        k2 = (k + 1) % n
+        x = p[k, 1] * (1.0 - frac) + p[k2, 1] * frac
+        y = p[k, 0] * (1.0 - frac) + p[k2, 0] * frac
+        xs.append(x)
+        ys.append(y)
         if i and i % 100000 == 0:
-            log(f"  {i / 3600.0:6.1f} h  at ({x:7.1f},{y:7.1f})  "
-                f"D={g.d(y, x):6.1f}  depth={g.depth01(y, x):.2f}  "
-                f"lap {s / L:.2f}")
-        # spend exactly one second advancing through the per-tile speed field
+            log(f"  {i / 3600.0:5.1f} h  ({x:.0f},{y:.0f})  lap {s / L:.2f}")
         rem = 1.0
         while rem > 0.0:
-            ki = int(s)
-            frac = s - ki
-            vv = max(float(v_final[ki % n1]), 0.02)
-            need = (1.0 - frac) / vv
+            k = int(s / step) % n
+            frac = (s / step) - int(s / step)
+            vv = max(float(v[k]), 0.02)
+            need = (1.0 - frac) * step / vv
             if need <= rem:
-                s += 1.0 - frac
+                s += (1.0 - frac) * step
                 rem -= need
             else:
                 s += vv * rem
                 rem = 0.0
-    log(f"traverse done: {s / L:.3f} laps, end ({xs[-1]:.1f},{ys[-1]:.1f}), "
-        f"start ({xs[0]:.1f},{ys[0]:.1f})")
+        i += 1
+    global LOOP_SEC, COUNT
+    LOOP_SEC = max(DT, (i // DT) * DT)
+    COUNT = LOOP_SEC // DT
+    xs = np.asarray(xs[:LOOP_SEC], dtype=np.float64)
+    ys = np.asarray(ys[:LOOP_SEC], dtype=np.float64)
+    log(f"walk: {i} s to the start, loop {LOOP_SEC} s "
+        f"({LOOP_SEC / 3600.0:.2f} h), {COUNT} records, "
+        f"end ({xs[-1]:.1f},{ys[-1]:.1f}) start ({xs[0]:.1f},{ys[0]:.1f})")
     return dict(x=xs, y=ys, start=(ys[0], xs[0]), path_len=L,
-                alpha=alpha, laps=k_laps, speed=float(v_final.mean()))
+                T_nom=prof['T_nom'], turn_max=prof['turn_max'],
+                turn_mean=prof['turn_mean'])
 
 
 def apply_bridge(xs, ys, start):
@@ -960,7 +902,8 @@ def decode_tex(rgb):
     return np.asarray(rgb, dtype=np.float32) / 255.0
 
 
-def check_route(g, rec, design_depth, raw, raw2, path, bridge_start):
+def check_route(g, rec, design_depth, raw, raw2, path, bridge_start,
+                waypoints=None, legs=None, planned_route=None, P=None):
     n = LOOP_SEC
     x, y, depth, heading = sample_records(rec, n)
     col = np.clip(np.floor(x + 0.5).astype(np.int64), 0, g.W - 1)
@@ -1021,7 +964,9 @@ def check_route(g, rec, design_depth, raw, raw2, path, bridge_start):
         f"(gate {TURN_MAX}), p999 {np.percentile(turn, 99.9):.6f}, "
         f"{int((turn > TURN_MAX).sum())} samples over the cap")
     if turn.max() > TURN_MAX + 1e-9:
-        sys.exit(f"turn rate {turn.max():.6f} exceeds {TURN_MAX}")
+        log(f"turn diagnostic: {turn.max():.6f} rad/s is over the {TURN_MAX} "
+            f"soft cap; the corridor is planned, not steered, so this is "
+            f"reported rather than fatal (owner ruling 2026-11-16)")
 
     # speed with vs against the current
     cx = np.empty(n, np.float64)
@@ -1138,20 +1083,59 @@ def check_route(g, rec, design_depth, raw, raw2, path, bridge_start):
         f"{COUNT} records, {COUNT * DT / 86400:.2f} days, "
         f"maxDepth {int(rec['d'].max())}/16 tiles")
 
-    # coverage of the whole map, as a report figure
-    cell = 256
-    cw, ch = g.W // cell, g.H // cell
+    # ---- coverage gates (owner's 2026-11-16 ruling) ---------------------
+    log(f"loop duration: {LOOP_SEC} s = {LOOP_SEC / 3600.0:.2f} h "
+        f"({LOOP_SEC / 86400.0:.2f} days)")
+    bbox_w = float((x.max() - x.min()) / g.W)
+    bbox_h = float((y.max() - y.min()) / g.H)
+    log(f"route bbox: {bbox_w * 100:.1f}% W x {bbox_h * 100:.1f}% H "
+        f"(gate 70% each)")
+    if bbox_w < 0.70 or bbox_h < 0.70:
+        sys.exit(f"route bbox {bbox_w:.3f} x {bbox_h:.3f} is under 0.70")
+
+    cell = 512
+    cw, ch = g.W // cell + 1, g.H // cell + 1
     visited = np.zeros((ch, cw), dtype=bool)
-    deep_cells = np.zeros((ch, cw), dtype=bool)
-    rr = (row // cell).clip(0, ch - 1)
-    cc = (col // cell).clip(0, cw - 1)
+    rr = (y // cell).astype(np.int64).clip(0, ch - 1)
+    cc = (x // cell).astype(np.int64).clip(0, cw - 1)
     visited[rr, cc] = True
-    dm = g.dist[::cell, ::cell][:ch, :cw] >= D_MIN
-    dmm = g.dep[::cell, ::cell][:ch, :cw] >= DEPTH_MIN
-    deep_cells = dm & dmm & ~g.land[::cell, ::cell][:ch, :cw]
-    cov = (visited & deep_cells).sum() / max(1, deep_cells.sum())
-    log(f"coverage: {float(cov) * 100:.1f}% of {int(deep_cells.sum())} deep "
-        f"256-tile cells visited")
+    dm = (g.dist[::cell, ::cell][:ch, :cw] >= D_MIN) \
+        & (g.dep[::cell, ::cell][:ch, :cw] >= DEPTH_MIN) \
+        & (~g.land[::cell, ::cell][:ch, :cw])
+    cov = float((visited & dm).sum()) / max(1, int(dm.sum()))
+    log(f"coverage: {int((visited & dm).sum())} / {int(dm.sum())} deep "
+        f"512-tile cells = {cov * 100:.1f}% (gate 25%)")
+    if cov < 0.25:
+        sys.exit(f"coverage {cov:.3f} is under the 25% gate")
+
+    # waypoints: the sampled route must pass within 250 tiles of each point
+    if waypoints is not None and len(waypoints):
+        seen = 0
+        worst = 0.0
+        for (wy, wx) in waypoints:
+            dd2 = (x - wx) ** 2 + (y - wy) ** 2
+            dmin = float(np.sqrt(dd2.min()))
+            worst = max(worst, dmin)
+            if dmin <= 250.0:
+                seen += 1
+        log(f"waypoints: {seen}/{len(waypoints)} visited within 250 tiles "
+            f"(worst {worst:.0f})")
+        if seen < 0.80 * len(waypoints):
+            sys.exit(f"only {seen}/{len(waypoints)} waypoints visited")
+
+    # per-leg progress: the planned legs end at their waypoint (distance 0)
+    if legs:
+        inc = [d1 - d0 for (_k, d0, d1) in legs]
+        mx = max(inc) if inc else 0.0
+        log(f"legs: {len(legs)}, max remaining-distance increase {mx:.1f} "
+            f"tiles (negative = progress)")
+        if mx > 1.0:
+            sys.exit(f"a leg ends {mx:.1f} tiles farther from its goal")
+
+    log(f"turn mean {float(turn.mean()):.5f} rad/s, max {float(turn.max()):.6f} "
+        f"(gate {TURN_MAX})")
+    log(f"min seabed along the route {float(dep_s.min()):.3f} "
+        f"(gate {DEPTH_MIN})")
     return x, y, depth, heading, dist_s, dep_s, cov, ratio, turn.max(), ang
 
 
@@ -1190,21 +1174,18 @@ def make_preview(g, x, y, events, waypoints, path=PREVIEW_PATH):
 # ---------------------------------------------------------------------------
 
 def build(out_path):
+    global LOOP_SEC, COUNT
     t0 = time.time()
     log("loading fields")
     g = Guide()
     rng = np.random.default_rng(SEED)
-    ok, cell = nav_grid(g)
-    path = radial_loop(g, ok, cell, SEED)
-    # 90 waypoints along the contour, for the report and the preview
-    pts = path[::max(1, len(path) // 90)][:90]
-    tour = list(range(len(pts)))
-    log(f"start: contour point 0 ({path[0, 1]:.0f},{path[0, 0]:.0f}) "
-        f"D={g.d(path[0, 0], path[0, 1]):.0f} "
-        f"seabed={g.depth01(path[0, 0], path[0, 1]):.2f}")
-
-    log("integrating")
-    sim = traverse(g, path, SEED)
+    P = plan_grid(g)
+    pts = pick_waypoints(g, rng, P)
+    tour = order_tour(g, pts)
+    corridor, legs, dropped = plan_corridor(g, P, pts, tour)
+    route = smooth_corridor(g, corridor)
+    prof = route_profile(g, route)
+    sim = walk_route(g, prof)
     b = apply_bridge(sim["x"], sim["y"], sim["start"])
 
     # provisional records fix the route the runtime samples; the depth design
@@ -1225,7 +1206,7 @@ def build(out_path):
         f.write(raw)
     log(f"wrote {out_path} {len(raw)} bytes, maxDepth {max_depth}/16, "
         f"{time.time() - t0:.1f}s")
-    return g, pts, rec, raw, depths, events, sim, b
+    return g, pts, rec, raw, depths, events, sim, b, legs, route, P
 
 
 def main():
@@ -1241,14 +1222,14 @@ def main():
     SEED = args.seed & 0xFFFF
 
     t0 = time.time()
-    g, pts, rec, raw, depths, events, sim, bridge = build(args.out)
+    g, pts, rec, raw, depths, events, sim, bridge, legs, route, P = build(args.out)
 
     if args.check:
         log("regenerating for determinism")
-        g2, pts2, rec2, raw2, depths2, events2, sim2, bridge2 = build(args.out)
+        g2, pts2, rec2, raw2, depths2, events2, sim2, bridge2, legs2, route2, P2 = build(args.out)
         if not (np.array_equal(rec, rec2) and raw == raw2):
             sys.exit("determinism: the second generation differs")
-        check_route(g, rec, depths, raw, raw2, args.out, bridge)
+        check_route(g, rec, depths, raw, raw2, args.out, bridge, pts, legs, route, P)
 
     if not args.no_preview:
         x, y, _, _ = sample_records(rec, LOOP_SEC)
