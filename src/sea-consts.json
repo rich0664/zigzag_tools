@@ -1,5 +1,6 @@
 {
   "version": "0.3.1",
+  "whaleVersion": "1",
   "assetBase": "https://raw.githubusercontent.com/rich0664/zigzag_tools/master/dist",
   "map": { "w": 7749, "h": 5254 },
   "distMax": 600,
