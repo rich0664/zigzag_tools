@@ -63,7 +63,7 @@ ellipsoid beyond the first pass.
 - Follow the currents; speed varies with them.
 - Surface breaks use the same wave effect as the coast.
 - Body ~5-6 texels long, 2.5-3 across; final body is depth-bearing
-  (animated mesh or depth-mapped art); the prototype is a sphere/ellipsoid.
+  (a 3D mesh, not a sprite); the prototype is an ellipsoid stand-in with the same contract.
 
 ## Time and sync
 
@@ -229,17 +229,18 @@ or failed route leaves the whale off.
 
 ### Model path (later)
 
-The final body is a depth-bearing render, not a flat sprite: render the whale
-into a small colour+depth target centred on its screen position and composite it
-in the sea shader, with local height packed into the alpha channel (no second
-depth texture needed). The sea-side logic — local frame, waterline cut,
-submerged fog, ring distance, reveal, trim — is identical whether `zTop` comes
-from the ellipsoid today or from the target tomorrow, so the swap changes only
-the draw.
+The final body is a **3D mesh**, not a sprite: render the whale into a small
+colour+depth target centred on its screen position and composite it in the sea
+shader, with local height packed into the alpha channel (no second depth texture
+needed). The target is rendered at a **low resolution matched to the body's
+texel size** and sampled nearest, so the pixels are texel blocks while the mesh
+translates smoothly. The sea-side logic — local frame, waterline cut, submerged
+fog, ring distance, reveal, trim — is identical whether `zTop` comes from the
+ellipsoid stand-in today or from the mesh target tomorrow, so the swap changes
+only the draw.
 
-Because the view is top-down orthographic, a small pre-baked top-down sprite
-sheet with height in alpha is a legitimate cheaper substitute for an FBO pass,
-rotated by `uWhaleHeading` in the shader.
+No sprite sheet or texture atlas: the low-res look comes from the render
+resolution, not from flattening the body.
 
 ## Performance and robustness
 
